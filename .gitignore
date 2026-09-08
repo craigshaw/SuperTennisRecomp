@@ -1,0 +1,32 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local build and ROM-derived generation products.
+/build/
+/generated/
+/reference/
+/.tools/
+/vcpkg_installed/
+
+# The analysis cfg is evidence-backed and tracked; generated products remain
+# private.
+
+# Emulator and validation artifacts.
+/captures/
+/saves/
+/validation/
+/workspaces/
+*.jsonl
+*.sfc
+*.smc
+*.zip
+*.srm
+*.state
+*.sri
+
+# Local host configuration.
+config.ini
+keybinds.ini
+rom.cfg
+CMakeUserPresets.json

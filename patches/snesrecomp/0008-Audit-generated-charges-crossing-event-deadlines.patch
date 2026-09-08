@@ -1,0 +1,703 @@
+From d44bda696ed1c5c39cb6326098df38bcca0bd83a Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Sun, 6 Sep 2026 08:33:19 +0100
+Subject: [PATCH] Audit generated charges crossing event deadlines
+
+---
+ recompiler/v2/codegen.py              |   7 +
+ recompiler/v2/emit_function.py        |  41 ++++-
+ runner/src/cpu_state.h                |  10 ++
+ runner/src/snes/interp_bridge.c       | 238 +++++++++++++++++++++++++-
+ runner/src/snes/interp_bridge.h       |  13 ++
+ tests/interp816/bridge_test.c         |  58 +++++++
+ tests/v2/test_atomic_output.py        |  41 +++++
+ tests/v2/test_codegen_per_op_smoke.py |  15 +-
+ tests/v2/test_emit_cycle_charge.py    |  24 +++
+ tools/v2_emit.py                      |  11 +-
+ 10 files changed, 444 insertions(+), 14 deletions(-)
+
+diff --git a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+index 20e4b01..a7c639a 100644
+--- a/recompiler/v2/codegen.py
++++ b/recompiler/v2/codegen.py
+@@ -23,6 +23,7 @@ into a per-function emit driver (replacing the v1 emit_function) and
+ run the full SMW regen against it.
+ """
+ 
++import os
+ import sys
+ import pathlib
+ 
+@@ -2546,6 +2547,11 @@ def _emit_blockmove(op: BlockMove) -> List[str]:
+     fast_speed = region_speed(_CURRENT_SOURCE_PC24, 1)
+     speed_expr = (str(slow_speed) if slow_speed == fast_speed else
+                   f"(g_memsel ? {fast_speed} : {slow_speed})")
++    audit_line = (
++        f"      interp_bridge_event_audit_charge(cpu, {trace_pc}, "
++        f"7 * {speed_expr});"
++        if os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT') else ""
++    )
+     return [
+         "{",
+         f"  uint8 _src_b = {op.src_bank:#04x};",
+@@ -2569,6 +2575,7 @@ def _emit_blockmove(op: BlockMove) -> List[str]:
+         "      if (interp_bridge_lle_master_deadline_reached(cpu)) {",
+         f"        return interp_bridge_lle_yield_unwind(cpu, {trace_pc});",
+         "      }",
++        audit_line,
+         "      cpu->cycles += 7;",
+         f"      cpu->master_cycles += 7 * {speed_expr};",
+         "    }",
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index c75fb17..c277b51 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -101,7 +101,8 @@ def _block_speed(bank: int, pc: int):
+     return (f"(g_memsel ? {s_fast} : {s_slow})", None)
+ 
+ 
+-def _dynamic_charge_lines(insn, speed_expr: str = "8") -> List[str]:
++def _dynamic_charge_lines(insn, speed_expr: str = "8",
++                          audit_pc24: Optional[int] = None) -> List[str]:
+     """Runtime-only per-instruction cycle charges (Axis-2 step C dynamics),
+     emitted as conditional `cpu->cycles += 1;` statements just before the
+     instruction's effect. Branch-taken is charged at the terminator instead.
+@@ -119,9 +120,15 @@ def _dynamic_charge_lines(insn, speed_expr: str = "8") -> List[str]:
+         return []
+     charges = instr_runtime_charges(op)
+     out: List[str] = []
++    audit = (audit_pc24 is not None and
++             os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'))
++    audit_call = (
++        f"interp_bridge_event_audit_charge(cpu, 0x{audit_pc24:06X}u, "
++        f"{speed_expr}); " if audit else ""
++    )
+     if 'dp' in charges:
+         out.append(
+-            f"if (cpu->D & 0xFF) {{ cpu->cycles += 1; "
++            f"if (cpu->D & 0xFF) {{ {audit_call}cpu->cycles += 1; "
+             f"cpu->master_cycles += {speed_expr}; }}  /* D.l != 0 */")
+     if 'xcross' in charges:
+         mode = getattr(insn, 'mode', None)
+@@ -129,12 +136,14 @@ def _dynamic_charge_lines(insn, speed_expr: str = "8") -> List[str]:
+         if mode == _MODE_ABS_X:
+             out.append(
+                 f"if ((0x{base:04X} & 0xFF00) != ((0x{base:04X} + cpu->X) & 0xFF00))"
+-                f" {{ cpu->cycles += 1; cpu->master_cycles += {speed_expr}; }}"
++                f" {{ {audit_call}cpu->cycles += 1; "
++                f"cpu->master_cycles += {speed_expr}; }}"
+                 f"  /* abs,X read page-cross */")
+         elif mode == _MODE_ABS_Y:
+             out.append(
+                 f"if ((0x{base:04X} & 0xFF00) != ((0x{base:04X} + cpu->Y) & 0xFF00))"
+-                f" {{ cpu->cycles += 1; cpu->master_cycles += {speed_expr}; }}"
++                f" {{ {audit_call}cpu->cycles += 1; "
++                f"cpu->master_cycles += {speed_expr}; }}"
+                 f"  /* abs,Y read page-cross */")
+         # INDIR_Y (dp),Y: effective pointer is loaded at runtime from DP — not
+         # reconstructable from the static operand; left as a measured residual.
+@@ -1352,6 +1361,8 @@ def emit_function(rom: bytes, bank: int, start: int,
+         # Axis-5: master-clocks-per-CPU-cycle for this block's code region, used
+         # to weight the dynamic (D.l/page-cross/branch-taken) master charges.
+         _blk_spd_expr, _blk_spd_const = _block_speed(bank, key.pc)
++        _event_audit = bool(
++            os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'))
+ 
+         # Iterate the pre-lowered (Insn, [IROp]) pairs. Calling lower()
+         # again here would mint fresh Value-ids and break codegen's
+@@ -1505,7 +1516,10 @@ def emit_function(rom: bytes, bank: int, start: int,
+                 continue
+             # Axis-2 step C dynamics: charge runtime-only modifiers (D.l != 0,
+             # abs,X/Y read page-cross) for this instruction before its effect.
+-            for _ln in _dynamic_charge_lines(di_insn, _blk_spd_expr):
++            _audit_pc24 = getattr(
++                di_insn, 'addr', (bank << 16) | (key.pc & 0xFFFF))
++            for _ln in _dynamic_charge_lines(
++                    di_insn, _blk_spd_expr, _audit_pc24):
+                 lines.append(_ln)
+             for op in ir_ops:
+                 if isinstance(op, CondBranch):
+@@ -1516,6 +1530,7 @@ def emit_function(rom: bytes, bank: int, start: int,
+                     taken = succs[1] if len(succs) >= 2 else None
+                     pred = f"{_reg_for_flag(op.flag)} == {op.take_if}"
+                     blk_pc24 = (bank << 16) | (key.pc & 0xFFFF)
++                    branch_pc24 = getattr(di_insn, 'addr', blk_pc24)
+                     if taken is not None:
+                         target_stmt = _goto_or_return(taken, source_pc24=blk_pc24)
+                         # Axis-2: a taken conditional branch costs +1 cycle (the
+@@ -1523,7 +1538,11 @@ def emit_function(rom: bytes, bank: int, start: int,
+                         # the emulation-only page-cross +1 is omitted (SNES game
+                         # code runs e=0).
+                         lines.append(
+-                            f"if ({pred}) {{ cpu->cycles += 1; "
++                            f"if ({pred}) {{ "
++                            + (f"interp_bridge_event_audit_charge(cpu, "
++                               f"0x{branch_pc24:06X}u, {_blk_spd_expr}); "
++                               if _event_audit else "")
++                            + f"cpu->cycles += 1; "
+                             f"cpu->master_cycles += {_blk_spd_expr}; {target_stmt} }}")
+                     if fall is not None:
+                         lines.append(_goto_or_return(fall, source_pc24=blk_pc24)
+@@ -2152,8 +2171,18 @@ def emit_function(rom: bytes, bank: int, start: int,
+             src.append(f'    cpu->cycles += {_cyc_const};')
+             _spd_expr, _spd_const = _block_speed(bank, key.pc)
+             if _spd_const is not None:
++                if os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'):
++                    src.append(
++                        f'    interp_bridge_event_audit_charge(cpu, '
++                        f'0x{block_pc24:06X}u, '
++                        f'{_cyc_const * _spd_const}u);')
+                 src.append(f'    cpu->master_cycles += {_cyc_const * _spd_const};')
+             else:
++                if os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'):
++                    src.append(
++                        f'    interp_bridge_event_audit_charge(cpu, '
++                        f'0x{block_pc24:06X}u, '
++                        f'{_cyc_const} * {_spd_expr});')
+                 src.append(f'    cpu->master_cycles += {_cyc_const} * {_spd_expr};')
+         for ln in block_lines[key]:
+             # Inject RecompStackPop before any return so the stack stays balanced.
+diff --git a/runner/src/cpu_state.h b/runner/src/cpu_state.h
+index 7e3c950..bb5d9a0 100644
+--- a/runner/src/cpu_state.h
++++ b/runner/src/cpu_state.h
+@@ -692,12 +692,22 @@ RecompReturn interp_tier_dispatch_bank_miss(CpuState *cpu, uint32 addr_pc24,
+  * decay it into a value mistaken for a local NLR before the (bounded ≪ 2^30)
+  * host stack unwinds. */
+ #define RECOMP_RETURN_LLE_UNWIND_BASE 0x40000000
++typedef enum InterpDeadlineEvent {
++  INTERP_DEADLINE_EVENT_UNKNOWN = 0,
++  INTERP_DEADLINE_EVENT_VBLANK = 1,
++  INTERP_DEADLINE_EVENT_NMI = 2,
++  INTERP_DEADLINE_EVENT_IRQ = 3,
++} InterpDeadlineEvent;
+ int interp_bridge_in_lle_scheduler(void);
+ int interp_bridge_lle_master_deadline_reached(const CpuState *cpu);
+ RecompReturn interp_bridge_lle_yield_unwind(CpuState *cpu, uint32 resume_pc24);
+ uint32 interp_bridge_lle_resume_pc(void);
+ void interp_bridge_set_lle_bounce_exclusions(const uint32 *targets,
+                                               size_t count);
++/* Emitted only in explicit event-audit builds. Records a proposed generated
++ * clock charge whose interval may contain the active scheduler deadline. */
++void interp_bridge_event_audit_charge(const CpuState *cpu, uint32 pc24,
++                                      uint64 master_clocks);
+ 
+ /* Focused OAM-overflow observability recorders (debug_server.c).
+  * dbg_rts_trace is emitted by the RTS/RTL lowering; dbg_oam_block_trace
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index 92de11b..c6c2f3f 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -358,6 +358,233 @@ static int      s_lle_next_unwind_is_deadline = 0;
+ static uint32_t s_lle_resume_pc24   = 0;
+ static int      s_lle_wai_yield     = 0;
+ static uint64_t s_lle_master_deadline = 0;
++static InterpDeadlineEvent s_lle_master_deadline_event =
++    INTERP_DEADLINE_EVENT_UNKNOWN;
++
++typedef struct EventCrossingSite {
++    uint32_t pc24;
++    uint8_t mx;
++    uint8_t event;
++    uint64_t hits;
++    uint64_t irq_i_set_hits;
++    uint64_t max_lateness;
++    uint64_t max_charge;
++    uint64_t first_start;
++    uint64_t first_deadline;
++    uint64_t first_end;
++    int first_frame;
++    int last_frame;
++} EventCrossingSite;
++
++static EventCrossingSite *s_event_crossings;
++static int s_event_crossing_count;
++static int s_event_crossing_capacity;
++static uint64_t s_event_crossing_total;
++static uint64_t s_event_crossing_irq_i_set_total;
++static uint64_t s_event_crossing_overflow;
++static int s_event_audit_initialized;
++static int s_event_audit_enabled;
++static int s_event_audit_atexit_registered;
++static char s_event_audit_path[1024];
++
++static const char *event_crossing_kind_name(uint8_t event) {
++    switch ((InterpDeadlineEvent)event) {
++    case INTERP_DEADLINE_EVENT_VBLANK: return "vblank";
++    case INTERP_DEADLINE_EVENT_NMI: return "nmi";
++    case INTERP_DEADLINE_EVENT_IRQ: return "irq";
++    default: return "unknown";
++    }
++}
++
++static void event_crossing_json_string(FILE *file, const char *value) {
++    fputc('"', file);
++    for (const unsigned char *p = (const unsigned char *)(value ? value : "");
++         *p; ++p) {
++        if (*p == '"' || *p == '\\')
++            fputc('\\', file);
++        if (*p >= 0x20)
++            fputc(*p, file);
++    }
++    fputc('"', file);
++}
++
++extern const char *rtl_game_title(void);
++
++int interp_bridge_event_audit_write_report(void) {
++    if (!s_event_audit_enabled || !s_event_audit_path[0])
++        return 1;
++    FILE *file = fopen(s_event_audit_path, "wb");
++    if (!file) {
++        fprintf(stderr, "[event-crossing] cannot write report '%s'\n",
++                s_event_audit_path);
++        return 0;
++    }
++    fputs("{\n  \"schema\": \"snesrecomp event crossing audit v1\",\n"
++          "  \"title\": ", file);
++    event_crossing_json_string(file, rtl_game_title());
++    fprintf(file,
++            ",\n  \"scope\": \"generated clock-charge intervals\",\n"
++            "  \"deadline_source\": \"host scheduler\",\n"
++            "  \"crossings\": %llu,\n  \"distinct_tuples\": %d,\n"
++            "  \"irq_i_set_crossings\": %llu,\n  \"overflow\": %llu,\n"
++            "  \"entries\": [\n",
++            (unsigned long long)s_event_crossing_total,
++            s_event_crossing_count,
++            (unsigned long long)s_event_crossing_irq_i_set_total,
++            (unsigned long long)s_event_crossing_overflow);
++    for (int i = 0; i < s_event_crossing_count; ++i) {
++        const EventCrossingSite *site = &s_event_crossings[i];
++        fprintf(file,
++                "    %s{\"pc24\": %u, \"pc\": \"$%06X\", "
++                "\"m\": %u, \"x\": %u, \"event\": \"%s\", "
++                "\"hits\": %llu, \"irq_i_set_hits\": %llu, "
++                "\"max_lateness\": %llu, \"max_charge\": %llu, "
++                "\"first_start\": %llu, \"first_deadline\": %llu, "
++                "\"first_end\": %llu, \"first_frame\": %d, "
++                "\"last_frame\": %d}",
++                i ? ",\n" : "", site->pc24, site->pc24,
++                (unsigned)((site->mx >> 1) & 1u),
++                (unsigned)(site->mx & 1u),
++                event_crossing_kind_name(site->event),
++                (unsigned long long)site->hits,
++                (unsigned long long)site->irq_i_set_hits,
++                (unsigned long long)site->max_lateness,
++                (unsigned long long)site->max_charge,
++                (unsigned long long)site->first_start,
++                (unsigned long long)site->first_deadline,
++                (unsigned long long)site->first_end,
++                site->first_frame, site->last_frame);
++    }
++    fputs("\n  ]\n}\n", file);
++    if (fclose(file) != 0)
++        return 0;
++    fprintf(stderr,
++            "[event-crossing] report=%s crossings=%llu distinct=%d "
++            "irq_i_set=%llu overflow=%llu\n",
++            s_event_audit_path,
++            (unsigned long long)s_event_crossing_total,
++            s_event_crossing_count,
++            (unsigned long long)s_event_crossing_irq_i_set_total,
++            (unsigned long long)s_event_crossing_overflow);
++    return 1;
++}
++
++static void event_crossing_audit_atexit(void) {
++    (void)interp_bridge_event_audit_write_report();
++}
++
++static void event_crossing_audit_initialize(void) {
++    if (s_event_audit_initialized)
++        return;
++    s_event_audit_initialized = 1;
++    const char *path = getenv("SNESRECOMP_EVENT_CROSSING_AUDIT");
++    if (!path || !path[0])
++        return;
++    size_t length = strlen(path);
++    if (length >= sizeof(s_event_audit_path)) {
++        fprintf(stderr, "[event-crossing] report path is too long\n");
++        return;
++    }
++    memcpy(s_event_audit_path, path, length + 1);
++    s_event_audit_enabled = 1;
++    if (!s_event_audit_atexit_registered) {
++        s_event_audit_atexit_registered = 1;
++        atexit(event_crossing_audit_atexit);
++    }
++}
++
++void interp_bridge_event_audit_charge(const CpuState *cpu, uint32_t pc24,
++                                      uint64_t master_clocks) {
++    event_crossing_audit_initialize();
++    if (!s_event_audit_enabled || !cpu || !master_clocks ||
++        !s_lle_master_deadline)
++        return;
++    const uint64_t start = cpu->master_cycles;
++    const uint64_t end = start + master_clocks;
++    if (end < start || s_lle_master_deadline <= start ||
++        s_lle_master_deadline >= end)
++        return;
++
++    const uint32_t key_pc = pc24 & 0xFFFFFFu;
++    const uint8_t mx = (uint8_t)(((cpu->m_flag & 1u) << 1) |
++                                 (cpu->x_flag & 1u));
++    const uint8_t event = (uint8_t)s_lle_master_deadline_event;
++    int i;
++    for (i = 0; i < s_event_crossing_count; ++i) {
++        EventCrossingSite *site = &s_event_crossings[i];
++        if (site->pc24 == key_pc && site->mx == mx && site->event == event)
++            break;
++    }
++    if (i == s_event_crossing_count) {
++        if (i == s_event_crossing_capacity) {
++            int next = s_event_crossing_capacity
++                           ? s_event_crossing_capacity * 2
++                           : 64;
++            EventCrossingSite *grown = (EventCrossingSite *)realloc(
++                s_event_crossings, (size_t)next * sizeof(*s_event_crossings));
++            if (!grown) {
++                s_event_crossing_overflow++;
++                return;
++            }
++            s_event_crossings = grown;
++            s_event_crossing_capacity = next;
++        }
++        EventCrossingSite *site = &s_event_crossings[i];
++        memset(site, 0, sizeof(*site));
++        site->pc24 = key_pc;
++        site->mx = mx;
++        site->event = event;
++        site->first_start = start;
++        site->first_deadline = s_lle_master_deadline;
++        site->first_end = end;
++        site->first_frame = snes_frame_counter;
++        s_event_crossing_count++;
++        fprintf(stderr,
++                "[event-crossing] first event=%s pc=$%06X M%uX%u "
++                "start=%llu deadline=%llu end=%llu frame=%d\n",
++                event_crossing_kind_name(event), key_pc,
++                (unsigned)((mx >> 1) & 1u), (unsigned)(mx & 1u),
++                (unsigned long long)start,
++                (unsigned long long)s_lle_master_deadline,
++                (unsigned long long)end, snes_frame_counter);
++    }
++    EventCrossingSite *site = &s_event_crossings[i];
++    const uint64_t lateness = end - s_lle_master_deadline;
++    site->hits++;
++    site->last_frame = snes_frame_counter;
++    if (lateness > site->max_lateness)
++        site->max_lateness = lateness;
++    if (master_clocks > site->max_charge)
++        site->max_charge = master_clocks;
++    if (event == INTERP_DEADLINE_EVENT_IRQ && cpu->_flag_I) {
++        site->irq_i_set_hits++;
++        s_event_crossing_irq_i_set_total++;
++    }
++    s_event_crossing_total++;
++}
++
++#ifdef SNESRECOMP_TIER2_TEST
++void interp_bridge_event_audit_test_reset(void) {
++    free(s_event_crossings);
++    s_event_crossings = NULL;
++    s_event_crossing_count = 0;
++    s_event_crossing_capacity = 0;
++    s_event_crossing_total = 0;
++    s_event_crossing_irq_i_set_total = 0;
++    s_event_crossing_overflow = 0;
++    s_event_audit_initialized = 0;
++    s_event_audit_enabled = 0;
++    s_event_audit_path[0] = 0;
++}
++
++void interp_bridge_event_audit_test_stats(unsigned long long *crossings,
++                                          int *sites,
++                                          unsigned long long *irq_i_set) {
++    if (crossings) *crossings = s_event_crossing_total;
++    if (sites) *sites = s_event_crossing_count;
++    if (irq_i_set) *irq_i_set = s_event_crossing_irq_i_set_total;
++}
++#endif
+ /* Depth of nested interpreter runs and the run that owns the current paired
+  * AOT bounce. A rewritten/non-local return from that AOT root must resume the
+  * owning interpreter's guest call chain. */
+@@ -449,7 +676,16 @@ int interp_bridge_lle_took_wai(void) {
+     return v;
+ }
+ void interp_bridge_set_master_deadline(uint64_t master_clock) {
++    interp_bridge_set_master_deadline_event(
++        master_clock, INTERP_DEADLINE_EVENT_UNKNOWN);
++}
++
++void interp_bridge_set_master_deadline_event(uint64_t master_clock,
++                                             InterpDeadlineEvent event) {
+     s_lle_master_deadline = master_clock;
++    s_lle_master_deadline_event = master_clock
++                                      ? event
++                                      : INTERP_DEADLINE_EVENT_UNKNOWN;
+ }
+ 
+ int interp_bridge_lle_master_deadline_reached(const CpuState *cpu) {
+@@ -1879,8 +2115,6 @@ static void ram_routine_note(uint32_t target, uint32_t site, uint8_t mx) {
+     g_ram_routines[i].hits++;
+ }
+ 
+-extern const char *rtl_game_title(void);
+-
+ /* Find or add a tuple and journal its first sighting. outcome is -1 when the
+  * target has not run yet, 0 for a contained bail, and 1 for a clean return. */
+ static int tier2_discover(uint32_t site, uint32_t target, uint8_t mx,
+diff --git a/runner/src/snes/interp_bridge.h b/runner/src/snes/interp_bridge.h
+index 1deec31..c2c5801 100644
+--- a/runner/src/snes/interp_bridge.h
++++ b/runner/src/snes/interp_bridge.h
+@@ -112,6 +112,19 @@ int interp_bridge_lle_took_wai(void);
+  * Combine with snes_next_irq_master() when raster IRQs can occur before the
+  * next frame boundary. */
+ void interp_bridge_set_master_deadline(uint64_t master_clock);
++void interp_bridge_set_master_deadline_event(uint64_t master_clock,
++                                             InterpDeadlineEvent event);
++
++/* Write the optional generated-code event-crossing report immediately.
++ * SNESRECOMP_EVENT_CROSSING_AUDIT supplies the output path. Audit calls are
++ * emitted only when regeneration uses SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT=1. */
++int interp_bridge_event_audit_write_report(void);
++#ifdef SNESRECOMP_TIER2_TEST
++void interp_bridge_event_audit_test_reset(void);
++void interp_bridge_event_audit_test_stats(unsigned long long *crossings,
++                                          int *sites,
++                                          unsigned long long *irq_i_set);
++#endif
+ 
+ /* True only while a paired AOT bounce is executing inside an auto-quiescent
+  * scheduler whose current frame deadline has been reached. Long,
+diff --git a/tests/interp816/bridge_test.c b/tests/interp816/bridge_test.c
+index 0f56756..a598c30 100644
+--- a/tests/interp816/bridge_test.c
++++ b/tests/interp816/bridge_test.c
+@@ -820,6 +820,64 @@ int main(void) {
+       CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (interrupt frame popped)",
+             g_c.S); }
+ 
++    /* S15: report only deadlines strictly inside a generated charge interval.
++     * Exact start/end boundaries are already observable block boundaries. */
++    { const char *audit = "event_crossing_bridge_test.json";
++      unsigned long long crossings = 0, irq_i_set = 0;
++      int sites = 0;
++      remove(audit);
++#ifdef _WIN32
++      _putenv_s("SNESRECOMP_EVENT_CROSSING_AUDIT", audit);
++#else
++      setenv("SNESRECOMP_EVENT_CROSSING_AUDIT", audit, 1);
++#endif
++      interp_bridge_event_audit_test_reset();
++      init_cpu();
++      snes_frame_counter = 42;
++      g_c._flag_I = 0;
++      g_c.master_cycles = 80;
++      interp_bridge_set_master_deadline_event(
++          100, INTERP_DEADLINE_EVENT_NMI);
++      interp_bridge_event_audit_charge(&g_c, 0x008000, 40);
++      g_c.master_cycles = 60;
++      interp_bridge_event_audit_charge(&g_c, 0x008001, 40);
++      g_c.master_cycles = 100;
++      interp_bridge_event_audit_charge(&g_c, 0x008002, 40);
++      g_c.master_cycles = 90;
++      g_c._flag_I = 1;
++      interp_bridge_set_master_deadline_event(
++          100, INTERP_DEADLINE_EVENT_IRQ);
++      interp_bridge_event_audit_charge(&g_c, 0x008003, 20);
++      interp_bridge_event_audit_test_stats(&crossings, &sites, &irq_i_set);
++      printf("S15 generated charge crossing audit\n");
++      CHECK(crossings == 2, "crossings=%llu exp 2", crossings);
++      CHECK(sites == 2, "sites=%d exp 2", sites);
++      CHECK(irq_i_set == 1, "irq_i_set=%llu exp 1", irq_i_set);
++      CHECK(interp_bridge_event_audit_write_report(),
++            "event-crossing report write failed");
++      FILE *report = fopen(audit, "rb");
++      CHECK(report != NULL, "event-crossing report missing");
++      if (report) {
++        char body[4096];
++        size_t length = fread(body, 1, sizeof(body) - 1, report);
++        body[length] = 0;
++        fclose(report);
++        CHECK(strstr(body, "snesrecomp event crossing audit v1") != NULL,
++              "report schema missing");
++        CHECK(strstr(body, "\"pc\": \"$008000\"") != NULL,
++              "NMI site missing");
++        CHECK(strstr(body, "\"event\": \"irq\"") != NULL,
++              "IRQ event missing");
++      }
++      interp_bridge_set_master_deadline(0);
++#ifdef _WIN32
++      _putenv_s("SNESRECOMP_EVENT_CROSSING_AUDIT", "");
++#else
++      unsetenv("SNESRECOMP_EVENT_CROSSING_AUDIT");
++#endif
++      interp_bridge_event_audit_test_reset();
++      remove(audit); }
++
+     printf("\n==== interp_bridge Phase-1: %d/%d checks passed ====\n", g_check - g_fail, g_check);
+     if (g_fail) { printf("RESULT: FAIL (%d)\n", g_fail); return 1; }
+     tier2_capture_close();
+diff --git a/tests/v2/test_atomic_output.py b/tests/v2/test_atomic_output.py
+index 5397543..bcaa3e1 100644
+--- a/tests/v2/test_atomic_output.py
++++ b/tests/v2/test_atomic_output.py
+@@ -1,5 +1,6 @@
+ """Transactional generated-output publication tests."""
+ 
++import os
+ import pathlib
+ import subprocess
+ import sys
+@@ -109,3 +110,43 @@ def test_failed_regen_leaves_previous_generation_untouched():
+         result, _ = _run_minimal_regen(root, 0x00)  # BRK -> stub lint
+         assert result.returncode != 0
+         assert live.read_text(encoding='utf-8') == 'known-good\n'
++
++
++def test_event_audit_mode_invalidates_published_output_cache():
++    with tempfile.TemporaryDirectory() as raw:
++        root = pathlib.Path(raw)
++        rom = bytearray([0xFF] * 0x8000)
++        rom[0] = 0x60  # RTS
++        rom_path = root / 'game.sfc'
++        rom_path.write_bytes(rom)
++        cfg_dir = root / 'cfg'
++        cfg_dir.mkdir()
++        (cfg_dir / 'bank00.cfg').write_text(
++            'bank = 00\nfunc Entry 8000 end:8001\n', encoding='utf-8')
++        out_dir = root / 'gen'
++        command = [
++            sys.executable, str(REPO / 'tools' / 'v2_emit.py'),
++            '--rom', str(rom_path), '--cfg-dir', str(cfg_dir),
++            '--out-dir', str(out_dir), '--cfg-roots',
++            '--analysis-backend', 'python',
++        ]
++
++        normal_env = dict(os.environ)
++        normal_env.pop('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT', None)
++        normal = subprocess.run(
++            command, capture_output=True, text=True, env=normal_env)
++        assert normal.returncode == 0, normal.stdout + normal.stderr
++        source_path = out_dir / 'bank00_v2.c'
++        assert 'interp_bridge_event_audit_charge' not in source_path.read_text()
++
++        audit_env = dict(normal_env)
++        audit_env['SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'] = '1'
++        audit = subprocess.run(
++            command, capture_output=True, text=True, env=audit_env)
++        assert audit.returncode == 0, audit.stdout + audit.stderr
++        assert 'interp_bridge_event_audit_charge' in source_path.read_text()
++
++        restored = subprocess.run(
++            command, capture_output=True, text=True, env=normal_env)
++        assert restored.returncode == 0, restored.stdout + restored.stderr
++        assert 'interp_bridge_event_audit_charge' not in source_path.read_text()
+diff --git a/tests/v2/test_codegen_per_op_smoke.py b/tests/v2/test_codegen_per_op_smoke.py
+index be4f85c..d0d6b16 100644
+--- a/tests/v2/test_codegen_per_op_smoke.py
++++ b/tests/v2/test_codegen_per_op_smoke.py
+@@ -1,5 +1,7 @@
+ """Per-IR-op smoke tests for v2 codegen. Assert the emitted C contains
+ the expected substrings for each op kind."""
++import os
++
+ from _helpers import make_lorom_bank0  # noqa: E402
+ 
+ from v2.codegen import emit_op  # noqa: E402
+@@ -361,8 +363,16 @@ def test_return_short_emits_return_stmt():
+ 
+ 
+ def test_blockmove_mvn_increments():
+-    op = BlockMove(direction='mvn', src_bank=0x7E, dst_bank=0x7F)
+-    s = _joined(emit_op(op, source_pc24=0x808E7A))
++    name = 'SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'
++    previous = os.environ.get(name)
++    os.environ[name] = '1'
++    try:
++        op = BlockMove(direction='mvn', src_bank=0x7E, dst_bank=0x7F)
++        s = _joined(emit_op(op, source_pc24=0x808E7A))
++    finally:
++        os.environ.pop(name, None)
++        if previous is not None:
++            os.environ[name] = previous
+     assert "cpu->X = (uint16)(cpu->X +1)" in s
+     assert "cpu->Y = (uint16)(cpu->Y +1)" in s
+     assert "do {" in s
+@@ -371,6 +381,7 @@ def test_blockmove_mvn_increments():
+     assert "cpu->master_cycles += 7 * (g_memsel ? 6 : 8)" in s
+     assert "interp_bridge_lle_master_deadline_reached(cpu)" in s
+     assert "interp_bridge_lle_yield_unwind(cpu, 0x808e7au)" in s
++    assert "interp_bridge_event_audit_charge(cpu, 0x808e7au" in s
+     assert "cpu->X &= 0x00FFu" in s
+ 
+ 
+diff --git a/tests/v2/test_emit_cycle_charge.py b/tests/v2/test_emit_cycle_charge.py
+index 62b02a2..6013219 100644
+--- a/tests/v2/test_emit_cycle_charge.py
++++ b/tests/v2/test_emit_cycle_charge.py
+@@ -1,6 +1,7 @@
+ """Axis-2 step C: the v2 emitter charges each block's static 65816 CPU
+ cycles as a per-block constant (recompiler/snes_cycles.py via
+ emit_function._block_cycle_const). Guards the cost-model -> emitter wiring."""
++import os
+ import re
+ 
+ from _helpers import make_lorom_bank0  # noqa: E402
+@@ -110,3 +111,26 @@ def test_master_cycles_region_weighted_static_charge():
+     # And the weighting holds term-by-term (slow region => master == 8*cpu).
+     for c, m in zip(cyc, mas):
+         assert int(m) == int(c) * 8, f'master {m} != 8*{c}'
++
++
++def test_event_crossing_audit_is_regeneration_opt_in():
++    # A normal regeneration has no audit calls. An explicit audit regeneration
++    # observes the static block charge and the runtime D.l penalty separately.
++    rom = make_lorom_bank0({0x8000: bytes([0xA5, 0x00, 0x60])})
++    name = 'SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'
++    previous = os.environ.pop(name, None)
++    try:
++        normal = emit_function(rom, bank=0, start=0x8000,
++                               entry_m=1, entry_x=1)
++        assert "interp_bridge_event_audit_charge" not in normal
++
++        os.environ[name] = '1'
++        audited = emit_function(rom, bank=0, start=0x8000,
++                                entry_m=1, entry_x=1)
++        call = "interp_bridge_event_audit_charge(cpu, 0x008000u,"
++        assert audited.count(call) == 2, audited
++        assert audited.index(call) < audited.index("cpu->master_cycles += 72;")
++    finally:
++        os.environ.pop(name, None)
++        if previous is not None:
++            os.environ[name] = previous
+diff --git a/tools/v2_emit.py b/tools/v2_emit.py
+index 61a3141..e7336ea 100644
+--- a/tools/v2_emit.py
++++ b/tools/v2_emit.py
+@@ -250,12 +250,15 @@ def main() -> int:
+         tree_digest = _tree_digest((
+             REPO / "recompiler" / "v2", pathlib.Path(__file__).resolve(),
+             REPO / "tools" / "v2_analyze.py", *native_inputs))
+-        # This environment switch changes every emitted AOT body, so it must
+-        # participate in the published-output cache key.  Treat any non-empty
+-        # value as enabled to match emit_function.py's codegen guard.
++        # These environment switches change emitted AOT bodies, so they must
++        # participate in the published-output cache key. Treat any non-empty
++        # value as enabled to match the codegen guards.
+         deny_gate = bool(os.environ.get("SNESRECOMP_EMIT_AOT_DENY_GATE"))
++        event_audit = bool(os.environ.get(
++            "SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"))
+         return hashlib.sha256(
+-            f"{tree_digest}\0aot_deny_gate={int(deny_gate)}".encode()
++            (f"{tree_digest}\0aot_deny_gate={int(deny_gate)}"
++             f"\0event_crossing_audit={int(event_audit)}").encode()
+         ).hexdigest()
+ 
+     generator_digest = generator_digest_for(analysis_backend)
+-- 
+2.50.1 (Apple Git-155)
+

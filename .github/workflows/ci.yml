@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Apply pinned snesrecomp patch series
+        run: sh tools/apply-snesrecomp-patches.sh
+      - name: Check publication boundary
+        run: sh tools/check-publication-boundary.sh
+      - name: Run snesrecomp Python regressions
+        run: python3 snesrecomp/tests/v2/run_tests.py
+      - name: Run snesrecomp C regressions
+        run: bash snesrecomp/tests/run_c_tests.sh

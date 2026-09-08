@@ -1,0 +1,344 @@
+From 3678d0a6d7036217f26e32f6b9087d2933783690 Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Sun, 6 Sep 2026 12:38:56 +0100
+Subject: [PATCH] Deliver delayed-enable NMI requests
+
+---
+ runner/src/snes/interp_bridge.c              | 20 ++++--
+ runner/src/snes/interp_bridge.h              |  6 +-
+ runner/src/snes/snes.c                       | 26 ++++++-
+ runner/src/snes/snes.h                       | 26 ++++---
+ runner/src/snes/snes_regs.h                  | 10 +++
+ tests/interp816/bridge_test.c                | 74 +++++++++++++++++++-
+ tests/runtime_dispatch/rdnmi_open_bus_test.c | 12 ++++
+ 7 files changed, 154 insertions(+), 20 deletions(-)
+
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index c6c2f3f..5b106a9 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -689,10 +689,11 @@ void interp_bridge_set_master_deadline_event(uint64_t master_clock,
+ }
+ 
+ int interp_bridge_lle_master_deadline_reached(const CpuState *cpu) {
+-    const int reached =
+-        cpu && s_lle_sched_depth > 0 && s_interp_bounce_owner_depth > 0 &&
+-        s_lle_master_deadline != 0 &&
+-        cpu->master_cycles >= s_lle_master_deadline;
++    const int reached = cpu && s_lle_sched_depth > 0 &&
++        s_interp_bounce_owner_depth > 0 &&
++        ((g_snes && g_snes->nmiPending) ||
++         (s_lle_master_deadline != 0 &&
++          cpu->master_cycles >= s_lle_master_deadline));
+     if (reached)
+         s_lle_next_unwind_is_deadline = 1;
+     return reached;
+@@ -1046,11 +1047,18 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+         debug_on_block_enter(pc_before, in.a, in.x, in.y);
+         sync_cpu_to_interp(cpu, &in);
+ #endif
+-        /* IRQs are sampled between instructions.  An auto-quiescent whole-
++        /* Interrupts are sampled between instructions. An auto-quiescent whole-
+          * program run must return to its owning scheduler as soon as either
+-         * the CPU H/V comparator or a coprocessor asserts IRQ; otherwise a
++         * delayed-enable NMI, the CPU H/V comparator, or a coprocessor asserts
++         * an interrupt; otherwise a
+          * perfectly live hardware-poll loop can monopolize the bridge and
+          * starve the handler forever. */
++        if (auto_quiescent && steps && g_snes && g_snes->nmiPending) {
++            s_lle_resume_pc24=pc_before;
++            sync_interp_to_cpu(&in,cpu);
++            bridge_apu_flush(cpu);
++            return 1;
++        }
+         if (auto_quiescent && steps && !in.i && g_snes &&
+             (g_snes->inIrq ||
+              (g_snes->cart && g_snes->cart->superfx &&
+diff --git a/runner/src/snes/interp_bridge.h b/runner/src/snes/interp_bridge.h
+index c2c5801..ee163e1 100644
+--- a/runner/src/snes/interp_bridge.h
++++ b/runner/src/snes/interp_bridge.h
+@@ -127,9 +127,9 @@ void interp_bridge_event_audit_test_stats(unsigned long long *crossings,
+ #endif
+ 
+ /* True only while a paired AOT bounce is executing inside an auto-quiescent
+- * scheduler whose current frame deadline has been reached. Long,
+- * architecturally interruptible instructions use this at their legal byte
+- * boundaries before unwinding to the owning interpreter. */
++ * scheduler and either its deadline has been reached or a delayed-enable NMI
++ * is pending. Long, architecturally interruptible instructions use this at
++ * their legal byte boundaries before unwinding to the owning interpreter. */
+ int interp_bridge_lle_master_deadline_reached(const CpuState *cpu);
+ 
+ /* Execute an architectural interrupt handler through its terminal RTI. The
+diff --git a/runner/src/snes/snes.c b/runner/src/snes/snes.c
+index 4ddf63a..c2eda89 100644
+--- a/runner/src/snes/snes.c
++++ b/runner/src/snes/snes.c
+@@ -165,6 +165,8 @@ void snes_reset(Snes* snes, bool hard) {
+   snes->hPos = 0;
+   snes->vPos = 0;
+   snes->apuCatchupCycles = 0.0;
++  snes->nmiPending = false;
++  snes->nmiRaisedThisVblank = false;
+   snes->hIrqEnabled = false;
+   snes->vIrqEnabled = false;
+   snes->nmiEnabled = false;
+@@ -617,12 +619,31 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr) {
+   }
+ }
+ 
++void snes_latch_nmi(Snes *snes) {
++  if (!snes)
++    return;
++  snes->inNmi = true;
++  snes->nmiRaisedThisVblank = snes->nmiEnabled;
++  if (snes->nmiEnabled)
++    snes->nmiPending = true;
++}
++
++bool snes_take_nmi(Snes *snes) {
++  if (!snes || !snes->nmiPending)
++    return false;
++  snes->nmiPending = false;
++  return true;
++}
++
+ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
+   switch(adr) {
+     case 0x4016:
+       joypad_write_strobe(snes, val);
+       break;
+     case 0x4200: {
++      bool request_nmi = snes_nmitimen_requests_nmi(
++          snes->nmiEnabled, snes->inVblank, snes->inNmi,
++          snes->nmiRaisedThisVblank, val);
+       snes->autoJoyRead = val & 0x1;
+       if(!snes->autoJoyRead) snes->autoJoyTimer = 0;
+       snes->hIrqEnabled = val & 0x10;
+@@ -631,7 +652,10 @@ void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val) {
+       if(!snes->hIrqEnabled && !snes->vIrqEnabled) {
+         snes->inIrq = false;
+       }
+-      // TODO: enabling nmi during vblank with inNmi still set generates nmi
++      if (request_nmi) {
++        snes->nmiPending = true;
++        snes->nmiRaisedThisVblank = true;
++      }
+       //   enabling virq (and not h) on the vPos that vTimer is at generates irq (?)
+       break;
+     }
+diff --git a/runner/src/snes/snes.h b/runner/src/snes/snes.h
+index 580d66f..2b60147 100644
+--- a/runner/src/snes/snes.h
++++ b/runner/src/snes/snes.h
+@@ -31,16 +31,20 @@ struct Snes {
+   bool joypadStrobe;
+   uint8_t joypad1Index;
+   uint8_t joypad2Index;
+-  uint16_t joypad1Latched;
+-  uint16_t joypad2Latched;
+-  bool disableRender;
+-
+-  // ram data port ($2180-$2183)
++  uint16_t joypad1Latched;
++  uint16_t joypad2Latched;
++  bool disableRender;
++  /* Transient handoff from the hardware model to an event-driven host. The
++   * host consumes this before its next stable frame boundary. */
++  bool nmiPending;
++  bool nmiRaisedThisVblank;
++
++  // ram data port ($2180-$2183)
+   uint32_t ramAdr;
+   uint8_t *ram;
+ 
+-  // Host timing anchor; excluded from savestates and reconciled after load.
+-  uint64_t beamMasterLast;
++  // Host timing anchor; excluded from savestates and reconciled after load.
++  uint64_t beamMasterLast;
+ 
+   // --- saveload blob starts here (hPos .. divideResult) ---
+   uint16_t hPos;
+@@ -110,8 +114,12 @@ void snes_writeBBus(Snes* snes, uint8_t adr, uint8_t val);
+ uint8_t snes_read(Snes* snes, uint32_t adr);
+ void snes_write(Snes* snes, uint32_t adr, uint8_t val);
+ uint8_t snes_readReg(Snes* snes, uint16_t adr);
+-void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val);
+-uint16_t SwapInputBits(uint16_t x);
++void snes_writeReg(Snes* snes, uint16_t adr, uint8_t val);
++/* Latch a VBlank NMI edge and consume the resulting CPU request. Hosts that
++ * own frame timing use these instead of writing inNmi directly. */
++void snes_latch_nmi(Snes *snes);
++bool snes_take_nmi(Snes *snes);
++uint16_t SwapInputBits(uint16_t x);
+ 
+ 
+ // snes_other.c functions:
+diff --git a/runner/src/snes/snes_regs.h b/runner/src/snes/snes_regs.h
+index f782536..603e097 100644
+--- a/runner/src/snes/snes_regs.h
++++ b/runner/src/snes/snes_regs.h
+@@ -11,6 +11,16 @@ static inline unsigned char snes_rdnmi_merge_open_bus(
+   return (unsigned char)((driven & 0x8f) | (open_bus & 0x70));
+ }
+ 
++/* One 0->1 transition of NMITIMEN bit 7 may assert the CPU NMI input during
++ * VBlank. This is separate from the RDNMI read-clear operation. */
++static inline int snes_nmitimen_requests_nmi(
++    int was_enabled, int in_vblank, int rdnmi_latched,
++    int already_raised,
++    unsigned char value) {
++  return !was_enabled && in_vblank && rdnmi_latched && !already_raised &&
++         (value & 0x80) != 0;
++}
++
+ typedef enum SnesRegs {
+   INIDISP = 0x2100,
+   OBSEL = 0x2101,
+diff --git a/tests/interp816/bridge_test.c b/tests/interp816/bridge_test.c
+index a598c30..fefebc2 100644
+--- a/tests/interp816/bridge_test.c
++++ b/tests/interp816/bridge_test.c
+@@ -24,6 +24,7 @@
+ #include "interp_bridge.h"   /* -> cpu_state.h (types, inline frame helpers) */
+ #include "tier2_capture.h"
+ #include "snes.h"            /* Snes storage for the bridge's APU clock hook */
++#include "snes_regs.h"
+ #include "sa1.h"
+ 
+ CpuState g_cpu;
+@@ -38,6 +39,7 @@ static int      g_aot_double_rewrite;
+ static int      g_aot_crosses_interp_owner;
+ static int      g_aot_skips_interp_owner;
+ static int      g_aot_deadline_unwind;
++static int      g_aot_nmi_unwind;
+ static int      g_owner_target_result;
+ static int      g_aot_tail_chain_probe;
+ static int      g_aot_skips_root;
+@@ -100,7 +102,19 @@ uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
+     (void)cpu; return RAM[(((uint32)bank << 16) | addr) & 0xFFFFFF];
+ }
+ void cpu_write8(CpuState *cpu, uint8 bank, uint16 addr, uint8 v) {
+-    (void)cpu; RAM[(((uint32)bank << 16) | addr) & 0xFFFFFF] = v;
++    (void)cpu;
++    uint32 key = (((uint32)bank << 16) | addr) & 0xFFFFFF;
++    RAM[key] = v;
++    if (key == 0x004200) {
++        int request = snes_nmitimen_requests_nmi(
++            g_snes->nmiEnabled, g_snes->inVblank, g_snes->inNmi,
++            g_snes->nmiRaisedThisVblank, v);
++        g_snes->nmiEnabled = (v & 0x80) != 0;
++        if (request) {
++            g_snes->nmiPending = true;
++            g_snes->nmiRaisedThisVblank = true;
++        }
++    }
+ }
+ uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
+     uint8 lo = cpu_read8(cpu, bank, addr);
+@@ -183,6 +197,15 @@ RecompReturn cpu_dispatch_pc_paired(CpuState *cpu, uint32 pc24,
+         cpu->S = (uint16)(cpu->S + frame_size);
+         return RECOMP_RETURN_NORMAL;
+     }
++    if (g_aot_nmi_unwind && (pc24 & 0xFFFFFF) == FAKE_AOT) {
++        g_aot_called++;
++        g_snes->nmiPending = true;
++        if (interp_bridge_lle_master_deadline_reached(cpu))
++            return interp_bridge_lle_yield_unwind(cpu, 0x008100);
++        cpu->A = 0x0100;
++        cpu->S = (uint16)(cpu->S + frame_size);
++        return RECOMP_RETURN_NORMAL;
++    }
+     if (g_aot_skips_root && (pc24 & 0xFFFFFF) == FAKE_AOT) {
+         /* Model a compiled root whose nested helper consumes the root's guest
+          * JSL frame and returns SKIP_1 through the root host frame. The owning
+@@ -317,6 +340,11 @@ static void post_rti_probe(CpuState *cpu, uint32_t pc24) {
+ 
+ static void init_cpu(void) {
+     memset(&g_c, 0, sizeof g_c);
++    g_test_snes.nmiEnabled = false;
++    g_test_snes.inVblank = false;
++    g_test_snes.inNmi = false;
++    g_test_snes.nmiPending = false;
++    g_test_snes.nmiRaisedThisVblank = false;
+     g_c.S = 0x01FF; g_c.emulation = 1; g_c.m_flag = 1; g_c.x_flag = 1;
+     g_c._flag_I = 1; g_c.ram = RAM; cpu_mirrors_to_p(&g_c);
+ }
+@@ -647,6 +675,50 @@ int main(void) {
+       interp_bridge_set_master_deadline(0);
+       g_aot_deadline_unwind = 0; }
+ 
++    /* S8d: an interpreted NMITIMEN write that enables NMI while RDNMI is
++     * latched returns at the following instruction boundary. */
++    { memset(RAM, 0, MEMSZ); init_cpu();
++      g_test_snes.inNmi = true;
++      g_test_snes.inVblank = true;
++      uint8_t scheduler[] = {
++          0xA9,0x81,                           /* LDA #$81 */
++          0x8D,0x00,0x42,                      /* STA $4200 */
++          0xA9,0x5A                            /* must not execute */
++      };
++      load(0x8000, scheduler, sizeof scheduler);
++      int rc = interp_bridge_run_until_quiescent(&g_c, 0x008000);
++      printf("S8d delayed-enable NMI yields interpreted execution\n");
++      CHECK(rc == 1, "rc=%d exp 1", rc);
++      CHECK((g_c.A & 0xFF) == 0x81,
++            "A.lo=%02X exp 81 (post-write instruction not executed)",
++            g_c.A & 0xFF);
++      CHECK(g_test_snes.nmiPending, "NMI request was not retained");
++      CHECK(interp_bridge_lle_resume_pc() == 0x008005,
++            "resume=$%06X exp $008005",
++            (unsigned)interp_bridge_lle_resume_pc()); }
++
++    /* S8e: the same asynchronous request unwinds a paired AOT bounce even
++     * when the scheduler's clock deadline has not expired. */
++    { memset(RAM, 0, MEMSZ); init_cpu(); g_aot_called = 0;
++      g_aot_nmi_unwind = 1;
++      uint8_t scheduler[] = {
++          0x22,0x00,0x81,0x00,                 /* JSL fake compiled root */
++          0xA9,0x5A                            /* must not execute */
++      };
++      load(0x8000, scheduler, sizeof scheduler);
++      int rc = interp_bridge_run_until_quiescent(&g_c, 0x008000);
++      printf("S8e delayed-enable NMI unwinds compiled execution\n");
++      CHECK(rc == 1, "rc=%d exp 1", rc);
++      CHECK(g_aot_called == 1, "aot_called=%d exp 1", g_aot_called);
++      CHECK((g_c.A & 0xFF) == 0x00,
++            "A.lo=%02X exp 00 (continuation not executed)", g_c.A & 0xFF);
++      CHECK(g_c.S == 0x01FC,
++            "S=%04X exp 01FC (compiled JSL frame retained)", g_c.S);
++      CHECK(interp_bridge_lle_resume_pc() == 0x008100,
++            "resume=$%06X exp $008100",
++            (unsigned)interp_bridge_lle_resume_pc());
++      g_aot_nmi_unwind = 0; }
++
+     /* S9: the same rewrite below the paired AOT root belongs to a compiled
+      * ancestor, not directly to the scheduler interpreter.  Finish that
+      * ancestor's epilogue in the nested tier, propagate SKIP_1 through its
+diff --git a/tests/runtime_dispatch/rdnmi_open_bus_test.c b/tests/runtime_dispatch/rdnmi_open_bus_test.c
+index 7501713..6f462fd 100644
+--- a/tests/runtime_dispatch/rdnmi_open_bus_test.c
++++ b/tests/runtime_dispatch/rdnmi_open_bus_test.c
+@@ -17,6 +17,18 @@ int main(void) {
+                     "RDNMI combines NMI, version and open-bus bits");
+   failures += check(snes_rdnmi_merge_open_bus(0xff, 0x00) == 0x8f,
+                     "RDNMI never leaks driven bits 4-6");
++  failures += check(snes_nmitimen_requests_nmi(0, 1, 1, 0, 0x80),
++                    "enabling NMI with RDNMI latched requests NMI");
++  failures += check(!snes_nmitimen_requests_nmi(1, 1, 1, 0, 0x80),
++                    "writing an already-enabled NMI bit has no new edge");
++  failures += check(!snes_nmitimen_requests_nmi(0, 1, 0, 0, 0x80),
++                    "enabling NMI without an RDNMI latch does not request NMI");
++  failures += check(!snes_nmitimen_requests_nmi(0, 0, 1, 0, 0x80),
++                    "an old RDNMI latch outside VBlank does not request NMI");
++  failures += check(!snes_nmitimen_requests_nmi(0, 1, 1, 1, 0x80),
++                    "one VBlank cannot raise NMI twice");
++  failures += check(!snes_nmitimen_requests_nmi(0, 1, 1, 0, 0x01),
++                    "leaving NMI disabled does not request NMI");
+   if (!failures)
+     puts("rdnmi_open_bus_test: ok");
+   return failures != 0;
+-- 
+2.50.1 (Apple Git-155)
+

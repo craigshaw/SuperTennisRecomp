@@ -1,0 +1,365 @@
+From 503c79c23173e2c0c4086225d4ea55d1f3b014a8 Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Sun, 6 Sep 2026 10:50:43 +0100
+Subject: [PATCH] Replay Mode 7 raster state in frame hosts
+
+---
+ docs/LLE_SCHEDULER.md             |   9 +++
+ runner/src/snes/ppu.c             | 119 ++++++++++++++++++++----------
+ runner/src/snes/ppu.h             |   4 +-
+ runner/src/snes/snes.c            |   1 +
+ tests/dma/hdma_timing_test.c      |  16 ++++
+ tests/ppu/ppu_sprite_limit_test.c |  56 ++++++++++++++
+ 6 files changed, 164 insertions(+), 41 deletions(-)
+
+diff --git a/docs/LLE_SCHEDULER.md b/docs/LLE_SCHEDULER.md
+index 8c804d9..acbbec3 100644
+--- a/docs/LLE_SCHEDULER.md
++++ b/docs/LLE_SCHEDULER.md
+@@ -190,6 +190,15 @@ registers. That path is separate from the bus-time LLE walker; do not move HDMA
+ execution unconditionally into `ppu_runLine()` or existing game draw functions
+ will double-apply their `SimpleHdma_DoLine()` calls.
+ 
++A frame-model host that runs CPU work before drawing must also preserve raster
++display state. Call `ppu_rasterBegin()` before running the field, then call
++`ppu_rasterRenderBegin()` once and `ppu_rasterApplyLine()` before each
++`ppu_runLine()`. Generated direct writes and emulated B-bus writes both enter
++the journal, so interpreted CPU, DMA, and HDMA changes are covered. The journal
++contains display state such as mode, BG1 addressing and scroll, and layer masks.
++It deliberately excludes VRAM, CGRAM, and OAM data ports because replaying those
++uploads would apply them twice.
++
+ ---
+ 
+ ## SMW interpret-EVERYTHING floor: the dead-scratch dispatcher gap (2026-07-04)
+diff --git a/runner/src/snes/ppu.c b/runner/src/snes/ppu.c
+index 730446e..ec9fda8 100644
+--- a/runner/src/snes/ppu.c
++++ b/runner/src/snes/ppu.c
+@@ -2316,7 +2316,10 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
+  * scroll and layer set, the playfield another, the letterbox a third.
+  * Rendering the whole frame with the final state drew the demo black
+  * (measured: 61/61 frames rendered forcedBlank), and with INIDISP-only
+- * replay the HUD band drew black while the reference shows the health bars.
++ * replay the HUD band drew black while the reference shows the health bars.
++ * Super Tennis also switches BG1 from Mode 7 court data to a Mode 1 menu
++ * during player selection. Replaying only the final Mode 1 state duplicates
++ * the menu into the court band.
+  *
+  * Same defect class the HDMA engine solved (dma_initHdma/dma_doHdma):
+  * record during CPU time, replay per line at render time. The host brackets:
+@@ -2324,10 +2327,12 @@ uint8_t ppu_read(Ppu* ppu, uint8_t adr) {
+  *                                     line-0 state, including the write-twice
+  *                                     scroll latch
+  *   ppu_rasterApplyLine(ppu, line)    in the render loop before ppu_runLine
+- * The register-write path calls ppu_rasterRecord with the beam line.
++ * Both the generated direct-register path and the emulated B-bus path call
++ * ppu_rasterRecord with the beam line. The latter includes interpreted CPU,
++ * DMA, and HDMA writes.
+  *
+  * Registers journaled: the set the split handlers write. Data ports (VRAM/
+- * CGRAM/OAM) are deliberately excluded — those are uploads, not per-line
++ * CGRAM/OAM) are deliberately excluded. Those are uploads, not per-line
+  * display state, and replaying them would double-apply the data. */
+ #define PPU_RASTER_MAX 256
+ typedef struct { uint8_t line; uint16_t reg; uint8_t val; } PpuRasterEntry;
+@@ -2336,18 +2341,24 @@ static int s_raster_count;
+ static int s_raster_armed;
+ static int s_raster_next;
+ static uint8_t s_raster_hdmaen;
+-static int s_raster_hdmaen_pending;
+-static struct {
+-  uint8_t inidisp;
+-  uint16_t hScroll0, vScroll0;
+-  uint8_t tm, tmw, cgadsub, hdmaen;
+-  uint8_t scrollPrev, scrollPrev2;
++static int s_raster_hdmaen_pending;
++static struct {
++  uint8_t inidisp;
++  uint8_t bgmode, bg1sc;
++  uint16_t bgTileAdr;
++  uint16_t hScroll0, vScroll0;
++  int16_t m7h, m7v;
++  uint8_t tm, tmw, cgadsub, hdmaen;
++  uint8_t scrollPrev, scrollPrev2, m7prev;
+ } s_raster0;
+ 
+ static int raster_reg_journaled(uint16_t reg) {
+   switch (reg) {
+-    case 0x2100:                 /* INIDISP */
+-    case 0x210D: case 0x210E:    /* BG1HOFS / BG1VOFS */
++    case 0x2100:                 /* INIDISP */
++    case 0x2105:                 /* BGMODE */
++    case 0x2107:                 /* BG1SC */
++    case 0x210B:                 /* BG12NBA */
++    case 0x210D: case 0x210E:    /* BG1HOFS / BG1VOFS */
+     case 0x212C: case 0x212E:    /* TM / TMW */
+     case 0x2131:                 /* CGADSUB */
+     /* HDMAEN is a per-line fact as much as any PPU register. This title
+@@ -2368,33 +2379,52 @@ static int raster_reg_journaled(uint16_t reg) {
+ void ppu_rasterBegin(Ppu *ppu) {
+   s_raster_count = 0;
+   s_raster_next = 0;
+-  s_raster_armed = 1;
+-  s_raster0.inidisp = ppu->inidisp;      /* post-vblank state = line-0 state */
+-  s_raster0.hScroll0 = ppu->hScroll[0];
+-  s_raster0.vScroll0 = ppu->vScroll[0];
++  s_raster_armed = 1;
++  s_raster0.inidisp = ppu->inidisp;      /* post-vblank state = line-0 state */
++  s_raster0.bgmode = ppu->bgmode;
++  s_raster0.bg1sc = ppu->bgXsc[0];
++  s_raster0.bgTileAdr = ppu->bgTileAdr;
++  s_raster0.hScroll0 = ppu->hScroll[0];
++  s_raster0.vScroll0 = ppu->vScroll[0];
++  s_raster0.m7h = ppu->m7matrix[6];
++  s_raster0.m7v = ppu->m7matrix[7];
+   s_raster0.tm = ppu->screenEnabled[0];
+   s_raster0.tmw = ppu->screenWindowed[0];
+   s_raster0.cgadsub = ppu->cgadsub;
+   s_raster0.hdmaen = g_snesrecomp_last_hdmaen;
+-  s_raster0.scrollPrev = ppu->scrollPrev;
+-  s_raster0.scrollPrev2 = ppu->scrollPrev2;
++  s_raster0.scrollPrev = ppu->scrollPrev;
++  s_raster0.scrollPrev2 = ppu->scrollPrev2;
++  s_raster0.m7prev = ppu->m7prev;
+ }
+ 
+-void ppu_rasterRecord(uint16_t reg, uint16_t line, uint8_t val) {
+-  if (!s_raster_armed || !raster_reg_journaled(reg)) return;
++void ppu_rasterRecord(uint16_t reg, uint16_t line, uint8_t val) {
++  if (!s_raster_armed || !raster_reg_journaled(reg)) return;
+   if (line == 0 || line >= 225) {
+     /* A write outside active display is next frame's baseline, not a split.
+      * Track it in the snapshot so late-vblank writes are not lost. */
+-    switch (reg) {
+-      case 0x2100: s_raster0.inidisp = val; break;
+-      case 0x210D:
+-        s_raster0.hScroll0 =
+-            (uint16_t)((val << 8 | s_raster0.scrollPrev) & 0x3FF);
++    switch (reg) {
++      case 0x2100: s_raster0.inidisp = val; break;
++      case 0x2105: s_raster0.bgmode = val; break;
++      case 0x2107: s_raster0.bg1sc = val; break;
++      case 0x210B:
++        s_raster0.bgTileAdr =
++            (uint16_t)((s_raster0.bgTileAdr & 0xff00u) | val);
++        break;
++      case 0x210D:
++        s_raster0.m7h = (int16_t)(((uint16_t)val << 8 |
++                                   s_raster0.m7prev) & 0x1FFF);
++        s_raster0.m7prev = val;
++        s_raster0.hScroll0 = (uint16_t)(((uint16_t)val << 8 |
++            (s_raster0.scrollPrev & 0xF8) |
++            (s_raster0.scrollPrev2 & 0x07)) & 0x3FF);
+         s_raster0.scrollPrev = val;
+         s_raster0.scrollPrev2 = val;
+         break;
+-      case 0x210E:
+-        s_raster0.vScroll0 =
++      case 0x210E:
++        s_raster0.m7v = (int16_t)(((uint16_t)val << 8 |
++                                   s_raster0.m7prev) & 0x1FFF);
++        s_raster0.m7prev = val;
++        s_raster0.vScroll0 =
+             (uint16_t)((val << 8 | s_raster0.scrollPrev) & 0x3FF);
+         s_raster0.scrollPrev = val;
+         break;
+@@ -2428,15 +2458,21 @@ int ppu_rasterTakeHdmaen(uint8_t *out) {
+ 
+ void ppu_rasterRenderBegin(Ppu *ppu) {
+   if (!s_raster_armed) return;
+-  s_raster_hdmaen_pending = 0;
+-  ppu->inidisp = s_raster0.inidisp;
+-  ppu->hScroll[0] = s_raster0.hScroll0;
+-  ppu->vScroll[0] = s_raster0.vScroll0;
++  s_raster_hdmaen_pending = 0;
++  ppu->inidisp = s_raster0.inidisp;
++  ppu->bgmode = s_raster0.bgmode;
++  ppu->bgXsc[0] = s_raster0.bg1sc;
++  ppu->bgTileAdr = s_raster0.bgTileAdr;
++  ppu->hScroll[0] = s_raster0.hScroll0;
++  ppu->vScroll[0] = s_raster0.vScroll0;
++  ppu->m7matrix[6] = s_raster0.m7h;
++  ppu->m7matrix[7] = s_raster0.m7v;
+   ppu->screenEnabled[0] = s_raster0.tm;
+   ppu->screenWindowed[0] = s_raster0.tmw;
+   ppu->cgadsub = s_raster0.cgadsub;
+-  ppu->scrollPrev = s_raster0.scrollPrev;
+-  ppu->scrollPrev2 = s_raster0.scrollPrev2;
++  ppu->scrollPrev = s_raster0.scrollPrev;
++  ppu->scrollPrev2 = s_raster0.scrollPrev2;
++  ppu->m7prev = s_raster0.m7prev;
+   s_raster_next = 0;
+ }
+ 
+@@ -2450,13 +2486,18 @@ int ppu_rasterDebugDump(char *out, int cap) {
+   int i;
+   pos += snprintf(out + pos, cap - pos,
+                   "{\"count\":%d,\"armed\":%d,"
+-                  "\"base\":{\"inidisp\":\"0x%02X\",\"tm\":\"0x%02X\","
+-                  "\"tmw\":\"0x%02X\",\"cgadsub\":\"0x%02X\","
+-                  "\"bg1h\":%u,\"bg1v\":%u},\"entries\":[",
+-                  s_raster_count, s_raster_armed,
+-                  s_raster0.inidisp, s_raster0.tm, s_raster0.tmw,
+-                  s_raster0.cgadsub,
+-                  (unsigned)s_raster0.hScroll0, (unsigned)s_raster0.vScroll0);
++                  "\"base\":{\"inidisp\":\"0x%02X\","
++                  "\"bgmode\":\"0x%02X\",\"bg1sc\":\"0x%02X\","
++                  "\"bgTileAdr\":\"0x%04X\",\"tm\":\"0x%02X\","
++                  "\"tmw\":\"0x%02X\",\"cgadsub\":\"0x%02X\","
++                  "\"bg1h\":%u,\"bg1v\":%u,\"m7h\":%d,\"m7v\":%d},"
++                  "\"entries\":[",
++                  s_raster_count, s_raster_armed,
++                  s_raster0.inidisp, s_raster0.bgmode, s_raster0.bg1sc,
++                  s_raster0.bgTileAdr, s_raster0.tm, s_raster0.tmw,
++                  s_raster0.cgadsub, (unsigned)s_raster0.hScroll0,
++                  (unsigned)s_raster0.vScroll0, s_raster0.m7h,
++                  s_raster0.m7v);
+   for (i = 0; i < s_raster_count && pos < cap - 64; i++) {
+     pos += snprintf(out + pos, cap - pos, "%s{\"l\":%u,\"r\":\"0x%04X\",\"v\":\"0x%02X\"}",
+                     i ? "," : "", (unsigned)s_raster[i].line,
+diff --git a/runner/src/snes/ppu.h b/runner/src/snes/ppu.h
+index 95f6b53..5de8f21 100644
+--- a/runner/src/snes/ppu.h
++++ b/runner/src/snes/ppu.h
+@@ -402,8 +402,8 @@ void ppu_runLine(Ppu* ppu, int line);
+ uint8_t ppu_read(Ppu* ppu, uint8_t adr);
+ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val);
+ 
+-/* Raster journal — per-line replay of mid-frame INIDISP writes for frame-model
+- * hosts. See the block comment in ppu.c. Host calls Begin after its
++/* Raster journal for per-line replay of mid-frame display-state writes in
++ * frame-model hosts. See the block comment in ppu.c. Host calls Begin after its
+  * vblank-edge work and ApplyLine in its render loop; the register write path
+  * calls Record with the beam line. */
+ void ppu_rasterBegin(Ppu *ppu);
+diff --git a/runner/src/snes/snes.c b/runner/src/snes/snes.c
+index 24e2c3d..4ddf63a 100644
+--- a/runner/src/snes/snes.c
++++ b/runner/src/snes/snes.c
+@@ -263,6 +263,7 @@ uint8_t snes_readBBus(Snes* snes, uint8_t adr) {
+ void snes_writeBBus(Snes* snes, uint8_t adr, uint8_t val) {
+   if(adr < 0x40) {
+     ppu_write(g_ppu, adr, val);
++    ppu_rasterRecord((uint16_t)(0x2100u + adr), snes->vPos, val);
+     return;
+   }
+   if(adr < 0x80) {
+diff --git a/tests/dma/hdma_timing_test.c b/tests/dma/hdma_timing_test.c
+index 968c89d..b48819c 100644
+--- a/tests/dma/hdma_timing_test.c
++++ b/tests/dma/hdma_timing_test.c
+@@ -22,6 +22,10 @@ void wlog_addr_note_direct(uint32_t wa, uint8_t v, const char *via) {
+ 
+ static uint8_t ram[0x20000];
+ static uint8_t ppu_regs[0x40];
++static unsigned raster_record_count;
++static uint16_t raster_record_reg;
++static uint16_t raster_record_line;
++static uint8_t raster_record_value;
+ 
+ uint8_t ppu_read(Ppu *ppu, uint8_t adr) {
+     (void)ppu;
+@@ -33,6 +37,13 @@ void ppu_write(Ppu *ppu, uint8_t adr, uint8_t val) {
+     ppu_regs[adr & 0x3f] = val;
+ }
+ 
++void ppu_rasterRecord(uint16_t reg, uint16_t line, uint8_t val) {
++    raster_record_count++;
++    raster_record_reg = reg;
++    raster_record_line = line;
++    raster_record_value = val;
++}
++
+ void RtlApuLock(void) {}
+ void RtlApuUnlock(void) {}
+ void rtl_sync_apu_to_cpu_locked(void) {}
+@@ -127,6 +138,11 @@ int main(void) {
+     failures += check(ppu_regs[0x26] == 0x00, "HDMA does not fire before HBlank");
+     snes_advance_master_cycles(&snes, 1);
+     failures += check(ppu_regs[0x26] == 0x44, "HDMA fires at HBlank");
++    failures += check(raster_record_count == 1 &&
++                          raster_record_reg == 0x2126 &&
++                          raster_record_line == 0 &&
++                          raster_record_value == 0x44,
++                      "B-bus PPU writes reach the raster journal");
+     failures += check(dma->channel[0].tableAdr == 0x0103, "HDMA consumed terminator at timing edge");
+ 
+     snes_advance_master_cycles(&snes, 1364u * 262u - 1024u);
+diff --git a/tests/ppu/ppu_sprite_limit_test.c b/tests/ppu/ppu_sprite_limit_test.c
+index 38f2333..56003de 100644
+--- a/tests/ppu/ppu_sprite_limit_test.c
++++ b/tests/ppu/ppu_sprite_limit_test.c
+@@ -115,6 +115,11 @@ static void render_one_line(Ppu *ppu) {
+     ppu_runLine(ppu, 1);
+ }
+ 
++static void raster_write(Ppu *ppu, uint16_t reg, uint16_t line, uint8_t val) {
++    ppu_write(ppu, (uint8_t)reg, val);
++    ppu_rasterRecord(reg, line, val);
++}
++
+ static unsigned count_argb_pixels(const uint32_t *pixels, size_t count) {
+     unsigned nonzero = 0;
+     for (size_t i = 0; i < count; i++) {
+@@ -568,6 +573,57 @@ int main(void) {
+                           "NULL left hints restore legacy margin behavior");
+     }
+ 
++    /* A frame-model host must restore every part of a Mode 7 to Mode 1 raster
++     * split, including the Mode 7 copies of the shared BG1 scroll registers. */
++    {
++        ppu_reset(ppu);
++        ppu->bgmode = 1;
++        ppu->bgXsc[0] = 0x48;
++        ppu->bgTileAdr = 0x0555;
++        ppu->screenEnabled[0] = 0x13;
++        ppu_rasterBegin(ppu);
++
++        raster_write(ppu, 0x2105, 0, 0x07);
++        raster_write(ppu, 0x2107, 0, 0x43);
++        raster_write(ppu, 0x210B, 0, 0x50);
++        raster_write(ppu, 0x210D, 0, 0x80);
++        raster_write(ppu, 0x210D, 0, 0x00);
++        raster_write(ppu, 0x210E, 0, 0xB8);
++        raster_write(ppu, 0x210E, 0, 0x00);
++        raster_write(ppu, 0x212C, 0, 0x11);
++
++        raster_write(ppu, 0x2105, 120, 0x01);
++        raster_write(ppu, 0x2107, 120, 0x48);
++        raster_write(ppu, 0x210B, 120, 0x55);
++        raster_write(ppu, 0x210D, 120, 0x00);
++        raster_write(ppu, 0x210D, 120, 0x00);
++        raster_write(ppu, 0x210E, 120, 0x00);
++        raster_write(ppu, 0x210E, 120, 0x00);
++        raster_write(ppu, 0x212C, 120, 0x13);
++
++        ppu_rasterRenderBegin(ppu);
++        failures += check(ppu->bgmode == 7 && ppu->bgXsc[0] == 0x43 &&
++                              (ppu->bgTileAdr & 0xff) == 0x50,
++                          "raster baseline restores Mode 7 addressing");
++        failures += check(ppu->hScroll[0] == 128 && ppu->vScroll[0] == 184 &&
++                              ppu->m7matrix[6] == 128 &&
++                              ppu->m7matrix[7] == 184,
++                          "raster baseline restores shared BG1 and Mode 7 scroll");
++        failures += check(ppu->screenEnabled[0] == 0x11,
++                          "raster baseline restores top-band layers");
++
++        ppu_rasterApplyLine(ppu, 120);
++        failures += check(ppu->bgmode == 1 && ppu->bgXsc[0] == 0x48 &&
++                              (ppu->bgTileAdr & 0xff) == 0x55,
++                          "raster split restores Mode 1 addressing");
++        failures += check(ppu->hScroll[0] == 0 && ppu->vScroll[0] == 0 &&
++                              ppu->m7matrix[6] == 0 &&
++                              ppu->m7matrix[7] == 0,
++                          "raster split updates shared BG1 and Mode 7 scroll");
++        failures += check(ppu->screenEnabled[0] == 0x13,
++                          "raster split restores bottom-band layers");
++    }
++
+     ppu_free(ppu);
+     if (failures) return 1;
+     puts("ppu_sprite_limit_test: PASS");
+-- 
+2.50.1 (Apple Git-155)
+

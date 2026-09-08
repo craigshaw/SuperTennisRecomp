@@ -1,0 +1,95 @@
+From b1453e932f3c54a8db6c4d80570a79011c6c63d4 Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Sat, 5 Sep 2026 19:56:23 +0100
+Subject: [PATCH] Retract stale exit facts after unresolved paths
+
+---
+ tests/v2/test_analysis_tool.py | 40 ++++++++++++++++++++++++++++++++++
+ tools/v2_analyze.py            | 15 +++++++++----
+ 2 files changed, 51 insertions(+), 4 deletions(-)
+
+diff --git a/tests/v2/test_analysis_tool.py b/tests/v2/test_analysis_tool.py
+index 6962b60..9c11c6a 100644
+--- a/tests/v2/test_analysis_tool.py
++++ b/tests/v2/test_analysis_tool.py
+@@ -66,6 +66,46 @@ def test_probe_requirement_does_not_become_caller_exit():
+     assert solved[helper] == frozenset({(0, 0)})
+ 
+ 
++def test_dispatch_helper_retraction_removes_stale_exit_fact():
++    rom = bytearray(make_lorom_bank0({
++        0x8000: bytes([
++            0x22, 0x00, 0x81, 0x00,  # JSL $00:8100
++            0x6C, 0x80, 0x00,        # JMP ($0080)
++        ]),
++        0x8050: bytes([
++            0x22, 0x00, 0x81, 0x00,  # Same helper, called with X=0.
++            0x60,
++        ]),
++        0x806C: bytes([0x60]),        # False short-table target.
++        # Helper-shaped only when decoded with X=1. With X=0 the LDX
++        # immediate consumes the following PLA byte and refutes the helper.
++        0x8100: bytes([
++            0xA2, 0x00, 0x68,        # LDX #$00 / high byte when X=0
++            0x0A, 0xAA,              # ASL A / TAX
++            0x6C, 0x20, 0x00,        # JMP ($0020)
++        ]),
++    }))
++    with tempfile.TemporaryDirectory() as directory:
++        cfg_dir = pathlib.Path(directory)
++        (cfg_dir / "bank00.cfg").write_text(
++            "bank = 00\n"
++            "func FirstCaller 8000 end:8007 entry_mx:1,1\n"
++            "func WidthRefuter 8050 end:8055 entry_mx:1,0\n"
++            "exit_mx_at 008100 1 1\n"
++            "exit_mx_at 00806C 1 1\n",
++            encoding="utf-8")
++        manifest, helpers, _inline = build_manifest(
++            bytes(rom), _load_cfgs(cfg_dir), max_insns=128, max_nodes=128,
++            all_cfg_roots=True)
++
++    caller = VariantKey(0x008000, 1, 1)
++    assert 0x008100 not in helpers
++    assert "has_lle_indirect_edge" in manifest.nodes[caller].reasons
++    assert caller not in manifest.exit_modes
++    assert caller not in manifest.exit_mode_sets
++    assert manifest.nodes[caller].disposition == NodeDisposition.AOT_ELIGIBLE
++
++
+ def test_manifest_from_cfg_roots_is_stable_and_follows_calls():
+     rom = make_lorom_bank0({
+         0x8000: bytes([0x20, 0x00, 0x90, 0x60]),
+diff --git a/tools/v2_analyze.py b/tools/v2_analyze.py
+index 6045610..99872af 100644
+--- a/tools/v2_analyze.py
++++ b/tools/v2_analyze.py
+@@ -938,15 +938,22 @@ def build_manifest(rom: bytes, parsed, *, max_insns: int, max_nodes: int,
+                     unstable_exit_mode_sets.add(fact_key)
+                     next_exit_mode_sets.pop(fact_key, None)
+ 
+-            # If a later round exposes an unresolved call in a variant, an
+-            # inferred exit fact retained from an earlier shorter graph is no
+-            # longer proven. Retract it and let callers stop at the boundary.
++            # If a later round exposes any unresolved exit path in a variant,
++            # an inferred exit fact retained from an earlier graph is no longer
++            # proven. This includes dynamic jumps that appear after a dispatch
++            # helper classification is retracted at another observed M/X width.
+             # Declared cfg/HLE ABI facts are independent of ROM decode and stay.
++            exit_fact_blockers = {
++                "unproven_callee_exit",
++                "has_lle_indirect_edge",
++                "has_lle_suppressed_call_edge",
++                "unstable_exit_fact",
++            }
+             for node_key, node in manifest.nodes.items():
+                 fact_key = (node_key.pc24, node_key.m, node_key.x)
+                 if (fact_key not in declared_exit_modes
+                         and fact_key not in recursive_solution_keys
+-                        and "unproven_callee_exit" in node.reasons):
++                        and exit_fact_blockers.intersection(node.reasons)):
+                     next_exit_modes.pop(fact_key, None)
+                     next_exit_mode_sets.pop(fact_key, None)
+             facts_stable = (
+-- 
+2.50.1 (Apple Git-155)
+

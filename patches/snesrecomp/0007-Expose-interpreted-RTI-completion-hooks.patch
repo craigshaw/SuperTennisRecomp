@@ -1,0 +1,118 @@
+From 303ced199406cab2f6cbb2601164d928e3b3db10 Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Sat, 5 Sep 2026 21:15:27 +0100
+Subject: [PATCH] Expose interpreted RTI completion hooks
+
+---
+ runner/src/snes/interp_bridge.c | 12 ++++++++++++
+ runner/src/snes/interp_bridge.h |  7 +++++++
+ tests/interp816/bridge_test.c   | 31 +++++++++++++++++++++++++++++++
+ 3 files changed, 50 insertions(+)
+
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index c648f06..92de11b 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -288,6 +288,7 @@ static struct {
+ static int s_pre_opcode_hook_count;
+ static int s_pre_opcode_redirect_valid;
+ static uint32_t s_pre_opcode_redirect_pc24;
++static InterpPostRtiHook s_post_rti_hook;
+ 
+ void interp_bridge_set_pre_opcode_hook(uint32_t pc24,
+                                        InterpPreOpcodeHook hook) {
+@@ -323,6 +324,10 @@ void interp_bridge_pre_opcode_redirect(uint32_t pc24) {
+     s_pre_opcode_redirect_valid = 1;
+ }
+ 
++void interp_bridge_set_post_rti_hook(InterpPostRtiHook hook) {
++    s_post_rti_hook = hook;
++}
++
+ /* BRK bridge seam. The bounce is via explicit JSR/JSL interception below, not
+  * via planted BRKs, so an interpreted BRK is treated as a no-op continue.
+  * (Production hardening may route an unexpected BRK to a contained stop.) */
+@@ -1286,6 +1291,13 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+             }
+         }
+ 
++        if (op == 0x40 && s_post_rti_hook) {
++            const uint32_t return_pc = ((uint32_t)in.k << 16) | in.pc;
++            sync_interp_to_cpu(&in, cpu);
++            s_post_rti_hook(cpu, return_pc);
++            sync_cpu_to_interp(cpu, &in);
++        }
++
+         /* A host-invoked architectural interrupt handler is paired with the
+          * real interrupt frame pushed by cpu_push_interrupt_frame(). Its RTI
+          * is the host boundary, just as RTS/RTL crossing the entry watermark
+diff --git a/runner/src/snes/interp_bridge.h b/runner/src/snes/interp_bridge.h
+index b68f88d..1deec31 100644
+--- a/runner/src/snes/interp_bridge.h
++++ b/runner/src/snes/interp_bridge.h
+@@ -52,6 +52,13 @@ typedef void (*InterpPreOpcodeHook)(CpuState *cpu, uint32_t pc24);
+ void interp_bridge_set_pre_opcode_hook(uint32_t pc24,
+                                        InterpPreOpcodeHook hook);
+ void interp_bridge_pre_opcode_redirect(uint32_t pc24);
++
++/* Optional notification after an interpreted RTI has restored the interrupted
++ * CPU state. The callback receives the exact resumed guest PC. Event-driven
++ * hosts use this to close interrupt-boundary captures without forcing the
++ * handler to execute atomically. */
++typedef void (*InterpPostRtiHook)(CpuState *cpu, uint32_t pc24);
++void interp_bridge_set_post_rti_hook(InterpPostRtiHook hook);
+ /* Dump the last n entries of the always-on global interp step ring
+  * (pc/op/sp/frame per interpreted opcode) to `out` (NULL = stderr). */
+ #include <stdio.h>
+diff --git a/tests/interp816/bridge_test.c b/tests/interp816/bridge_test.c
+index 1c2b100..0f56756 100644
+--- a/tests/interp816/bridge_test.c
++++ b/tests/interp816/bridge_test.c
+@@ -306,6 +306,15 @@ static int g_fail = 0, g_check = 0;
+     g_fail++; printf("    FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
+ 
+ static CpuState g_c;
++static int g_post_rti_count;
++static uint32_t g_post_rti_pc;
++
++static void post_rti_probe(CpuState *cpu, uint32_t pc24) {
++    (void)cpu;
++    g_post_rti_count++;
++    g_post_rti_pc = pc24;
++}
++
+ static void init_cpu(void) {
+     memset(&g_c, 0, sizeof g_c);
+     g_c.S = 0x01FF; g_c.emulation = 1; g_c.m_flag = 1; g_c.x_flag = 1;
+@@ -789,6 +798,28 @@ int main(void) {
+       CHECK(g_c.S == 0x01FF,
+             "S=%04X exp 01FF (inner JSR and outer JSL consumed)", g_c.S); }
+ 
++    /* S14: an event-driven host must be able to observe the exact restored
++     * continuation without forcing an interrupt handler to run atomically. */
++    { memset(RAM, 0, MEMSZ); init_cpu();
++      g_c.emulation = 0;
++      cpu_mirrors_to_p(&g_c);
++      uint8_t handler[] = {0x40};             /* RTI */
++      load(0x8000, handler, sizeof handler);
++      RAM[0x8234] = 0xCB;                     /* WAI after resumed RTI */
++      cpu_push_interrupt_frame_at(&g_c, 0x008234);
++      g_post_rti_count = 0;
++      g_post_rti_pc = 0;
++      interp_bridge_set_post_rti_hook(post_rti_probe);
++      int rc = interp_bridge_run_until_quiescent(&g_c, 0x008000);
++      interp_bridge_set_post_rti_hook(NULL);
++      printf("S14 post-RTI hook reports restored continuation\n");
++      CHECK(rc == 1, "rc=%d exp 1", rc);
++      CHECK(g_post_rti_count == 1, "hook count=%d exp 1", g_post_rti_count);
++      CHECK(g_post_rti_pc == 0x008234,
++            "hook pc=$%06X exp $008234", (unsigned)g_post_rti_pc);
++      CHECK(g_c.S == 0x01FF, "S=%04X exp 01FF (interrupt frame popped)",
++            g_c.S); }
++
+     printf("\n==== interp_bridge Phase-1: %d/%d checks passed ====\n", g_check - g_fail, g_check);
+     if (g_fail) { printf("RESULT: FAIL (%d)\n", g_fail); return 1; }
+     tier2_capture_close();
+-- 
+2.50.1 (Apple Git-155)
+

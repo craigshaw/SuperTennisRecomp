@@ -1,0 +1,400 @@
+From 0e559d2f534619c9e5c5bd6751c9310253421cee Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Sun, 6 Sep 2026 09:51:57 +0100
+Subject: [PATCH] Add audit-guided event precision path
+
+---
+ docs/LLE_SCHEDULER.md              | 30 ++++++++++
+ recompiler/v2/emit_function.py     | 21 +++++++
+ recompiler/v2/event_precision.py   | 93 ++++++++++++++++++++++++++++++
+ tests/v2/test_atomic_output.py     | 47 +++++++++++++++
+ tests/v2/test_emit_cycle_charge.py | 93 ++++++++++++++++++++++++++++++
+ tools/v2_emit.py                   |  5 +-
+ 6 files changed, 288 insertions(+), 1 deletion(-)
+ create mode 100644 recompiler/v2/event_precision.py
+
+diff --git a/docs/LLE_SCHEDULER.md b/docs/LLE_SCHEDULER.md
+index 4ae2268..8c804d9 100644
+--- a/docs/LLE_SCHEDULER.md
++++ b/docs/LLE_SCHEDULER.md
+@@ -100,6 +100,36 @@ resumes interpreting at the same PC — correct, one redundant hop.
+ already encodes: which PCs are the yield/die primitives (`hle_func` directives that
+ minimal cfgs need anyway) — and those stubs name their own real ROM entries.
+ 
++## Audit-guided event precision
++
++Generated AOT code normally charges the static time for a complete basic block at
++the block entry. This is fast, but a long block can hide the exact instruction
++boundary where an NMI, IRQ, or other scheduler event becomes due.
++
++An event-crossing audit report can be used directly as a precision profile:
++
++```sh
++SNESRECOMP_EVENT_PRECISION_PROFILE=/path/to/event-crossing-audit.json \
++  python3 tools/v2_emit.py ...
++```
++
++The generator validates the `snesrecomp event crossing audit v1` report and maps
++each actionable `(pc24, M, X)` charge observation to its containing exact AOT
++function variant. When that variant is reached under the LLE scheduler, it unwinds
++to the owning interpreter at the function entry. The interpreter then applies
++instruction-level timing and can return at an exact event boundary. Other variants
++and execution outside the scheduler keep the normal compiled path.
++
++The function is selected rather than only the observed basic block because aggregate
++charges in earlier blocks can shift the clock before the observed charge is reached.
++A report with tuple overflow is rejected. IRQ tuples observed only while the I flag
++was set are ignored because those IRQs were not deliverable. The profile contents are
++part of the generated-output cache identity.
++
++This is an evidence-guided precision path, not a title-specific address list and not
++a global per-instruction check. The report remains an external build input and should
++be regenerated when replay coverage changes.
++
+ ## Validation plan (the differential bonus)
+ 
+ Rich-LLE-bounced vs rich-LLE-interpreted is a **whole-game codegen differential**: both
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index c277b51..1a9a12a 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -39,6 +39,7 @@ from v2.naming import (  # noqa: E402
+     default_func_name as _default_func_name,
+     variant_suffix as _variant_suffix,
+ )
++from v2.event_precision import load_event_precision_sites  # noqa: E402
+ from snes_cycles import (  # noqa: E402
+     block_static_cycles, instr_runtime_charges, region_speed,
+ )
+@@ -631,6 +632,15 @@ def emit_function(rom: bytes, bank: int, start: int,
+         unresolved_indirect_collector.extend(graph.unresolved_indirects)
+     cfg = build_cfg(graph)
+ 
++    event_precision_sites = load_event_precision_sites()
++    event_precision_function = any(
++        (di.insn.addr & 0xFFFFFF,
++         di.insn.m_flag & 1,
++         di.insn.x_flag & 1) in event_precision_sites
++        for precision_block in cfg.blocks.values()
++        for di in precision_block.insns
++    )
++
+     # A tight, side-effect-free memory poll cannot execute atomically under
+     # the LLE frame scheduler: the value it observes is commonly changed by
+     # NMI/IRQ, and a compiled self-loop prevents that interrupt from ever
+@@ -2048,6 +2058,17 @@ def emit_function(rom: bytes, bank: int, start: int,
+     # Trace ring: function entry (carries name hash) — first entry per call.
+     fn_entry_pc = (bank << 16) | (start & 0xFFFF)
+     src.append(f'  cpu_trace_func_entry(cpu, 0x{fn_entry_pc:06X}, "{func_name}");')
++    # A crossing proves that aggregate charges somewhere in this exact AOT
++    # function variant can hide a scheduler boundary. Hand the whole function
++    # back to the owning interpreter: earlier aggregate-charged blocks can
++    # otherwise shift the clock before the observed crossing block is reached.
++    if event_precision_function:
++        src.append('  if (interp_bridge_in_lle_scheduler()) {')
++        src.append('    RecompStackPop();')
++        src.append(
++            f'    return interp_bridge_lle_yield_unwind('
++            f'cpu, 0x{fn_entry_pc:06X}u);  /* event-precision function */')
++        src.append('  }')
+     # A profile-promoted AOT call tree can stay native across enough guest
+     # calls to cross an event-driven host's frame deadline. Yield before
+     # entering the next architectural callee so the owning interpreter can
+diff --git a/recompiler/v2/event_precision.py b/recompiler/v2/event_precision.py
+new file mode 100644
+index 0000000..f4ec327
+--- /dev/null
++++ b/recompiler/v2/event_precision.py
+@@ -0,0 +1,93 @@
++"""Load event-crossing audit reports as exact AOT precision profiles."""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import pathlib
++from typing import FrozenSet, Tuple
++
++
++PROFILE_ENV = "SNESRECOMP_EVENT_PRECISION_PROFILE"
++PROFILE_SCHEMA = "snesrecomp event crossing audit v1"
++
++EventPrecisionSite = Tuple[int, int, int]
++
++
++def event_precision_profile_path() -> pathlib.Path | None:
++    value = os.environ.get(PROFILE_ENV)
++    return pathlib.Path(value).expanduser() if value else None
++
++
++def event_precision_profile_digest() -> str:
++    """Return a cache identity for the active profile and its contents."""
++    path = event_precision_profile_path()
++    if path is None:
++        return "disabled"
++    try:
++        contents = path.read_bytes()
++    except OSError as exc:
++        return f"unreadable:{path}:{exc}"
++    return hashlib.sha256(contents).hexdigest()
++
++
++def load_event_precision_sites() -> FrozenSet[EventPrecisionSite]:
++    """Return actionable ``(pc24, m, x)`` crossings from the active report."""
++    path = event_precision_profile_path()
++    if path is None:
++        return frozenset()
++    try:
++        report = json.loads(path.read_text(encoding="utf-8"))
++    except OSError as exc:
++        raise ValueError(f"cannot read event precision profile {path}: {exc}") from exc
++    except json.JSONDecodeError as exc:
++        raise ValueError(f"invalid event precision profile JSON {path}: {exc}") from exc
++
++    if not isinstance(report, dict) or report.get("schema") != PROFILE_SCHEMA:
++        raise ValueError(
++            f"event precision profile {path} must use schema {PROFILE_SCHEMA!r}")
++    overflow = report.get("overflow", 0)
++    if not isinstance(overflow, int) or overflow < 0:
++        raise ValueError(f"event precision profile {path} has invalid overflow")
++    if overflow:
++        raise ValueError(
++            f"event precision profile {path} is incomplete: overflow={overflow}")
++    entries = report.get("entries")
++    if not isinstance(entries, list):
++        raise ValueError(f"event precision profile {path} has no entries list")
++
++    result = set()
++    for index, entry in enumerate(entries):
++        if not isinstance(entry, dict):
++            raise ValueError(
++                f"event precision profile {path} entry {index} is not an object")
++        pc24 = entry.get("pc24")
++        m = entry.get("m")
++        x = entry.get("x")
++        hits = entry.get("hits")
++        irq_i_set_hits = entry.get("irq_i_set_hits", 0)
++        event = entry.get("event")
++        if not isinstance(pc24, int) or not 0 <= pc24 <= 0xFFFFFF:
++            raise ValueError(
++                f"event precision profile {path} entry {index} has invalid pc24")
++        if m not in (0, 1) or x not in (0, 1):
++            raise ValueError(
++                f"event precision profile {path} entry {index} has invalid M/X")
++        if not isinstance(hits, int) or hits < 0:
++            raise ValueError(
++                f"event precision profile {path} entry {index} has invalid hits")
++        if not isinstance(irq_i_set_hits, int) or not 0 <= irq_i_set_hits <= hits:
++            raise ValueError(
++                f"event precision profile {path} entry {index} has invalid "
++                "irq_i_set_hits")
++        if event not in ("vblank", "nmi", "irq", "unknown"):
++            raise ValueError(
++                f"event precision profile {path} entry {index} has invalid event")
++
++        # An IRQ cannot be delivered while I is set. A mixed tuple remains
++        # actionable because at least one observation occurred with IRQ enabled.
++        actionable_hits = hits - irq_i_set_hits if event == "irq" else hits
++        if actionable_hits:
++            result.add((pc24, m, x))
++    return frozenset(result)
+diff --git a/tests/v2/test_atomic_output.py b/tests/v2/test_atomic_output.py
+index bcaa3e1..c018039 100644
+--- a/tests/v2/test_atomic_output.py
++++ b/tests/v2/test_atomic_output.py
+@@ -1,5 +1,6 @@
+ """Transactional generated-output publication tests."""
+ 
++import json
+ import os
+ import pathlib
+ import subprocess
+@@ -150,3 +151,49 @@ def test_event_audit_mode_invalidates_published_output_cache():
+             command, capture_output=True, text=True, env=normal_env)
+         assert restored.returncode == 0, restored.stdout + restored.stderr
+         assert 'interp_bridge_event_audit_charge' not in source_path.read_text()
++
++
++def test_event_precision_profile_contents_invalidate_published_output_cache():
++    with tempfile.TemporaryDirectory() as raw:
++        root = pathlib.Path(raw)
++        rom = bytearray([0xFF] * 0x8000)
++        rom[0] = 0x60  # RTS
++        rom_path = root / 'game.sfc'
++        rom_path.write_bytes(rom)
++        cfg_dir = root / 'cfg'
++        cfg_dir.mkdir()
++        (cfg_dir / 'bank00.cfg').write_text(
++            'bank = 00\nfunc Entry 8000 end:8001\n', encoding='utf-8')
++        out_dir = root / 'gen'
++        report_path = root / 'event-crossings.json'
++        command = [
++            sys.executable, str(REPO / 'tools' / 'v2_emit.py'),
++            '--rom', str(rom_path), '--cfg-dir', str(cfg_dir),
++            '--out-dir', str(out_dir), '--cfg-roots',
++            '--analysis-backend', 'python',
++        ]
++        env = dict(os.environ)
++        env['SNESRECOMP_EVENT_PRECISION_PROFILE'] = str(report_path)
++
++        def write_report(entries):
++            report_path.write_text(json.dumps({
++                'schema': 'snesrecomp event crossing audit v1',
++                'overflow': 0,
++                'entries': entries,
++            }), encoding='utf-8')
++
++        write_report([{
++            'pc24': 0x008000, 'm': 1, 'x': 1, 'event': 'nmi',
++            'hits': 1, 'irq_i_set_hits': 0,
++        }])
++        precise = subprocess.run(
++            command, capture_output=True, text=True, env=env)
++        assert precise.returncode == 0, precise.stdout + precise.stderr
++        source_path = out_dir / 'bank00_v2.c'
++        assert 'event-precision function' in source_path.read_text()
++
++        write_report([])
++        fast = subprocess.run(
++            command, capture_output=True, text=True, env=env)
++        assert fast.returncode == 0, fast.stdout + fast.stderr
++        assert 'event-precision function' not in source_path.read_text()
+diff --git a/tests/v2/test_emit_cycle_charge.py b/tests/v2/test_emit_cycle_charge.py
+index 6013219..d52f050 100644
+--- a/tests/v2/test_emit_cycle_charge.py
++++ b/tests/v2/test_emit_cycle_charge.py
+@@ -1,8 +1,11 @@
+ """Axis-2 step C: the v2 emitter charges each block's static 65816 CPU
+ cycles as a per-block constant (recompiler/snes_cycles.py via
+ emit_function._block_cycle_const). Guards the cost-model -> emitter wiring."""
++import json
+ import os
++import pathlib
+ import re
++import tempfile
+ 
+ from _helpers import make_lorom_bank0  # noqa: E402
+ from v2.emit_function import emit_function  # noqa: E402
+@@ -134,3 +137,93 @@ def test_event_crossing_audit_is_regeneration_opt_in():
+         os.environ.pop(name, None)
+         if previous is not None:
+             os.environ[name] = previous
++
++
++def _event_precision_report(path, entries, *, overflow=0):
++    pathlib.Path(path).write_text(json.dumps({
++        "schema": "snesrecomp event crossing audit v1",
++        "overflow": overflow,
++        "entries": entries,
++    }), encoding="utf-8")
++
++
++def test_event_precision_profile_routes_only_the_observed_mx_function_to_lle():
++    # An observation at a middle instruction must route from the containing
++    # function's architectural entry, before any earlier aggregate block charge.
++    rom = make_lorom_bank0({0x8000: bytes([0xEA, 0x0A, 0x60])})
++    name = 'SNESRECOMP_EVENT_PRECISION_PROFILE'
++    previous = os.environ.pop(name, None)
++    try:
++        normal = emit_function(rom, bank=0, start=0x8000,
++                               entry_m=1, entry_x=1)
++        assert "event-precision function" not in normal
++
++        with tempfile.TemporaryDirectory() as raw:
++            report = pathlib.Path(raw) / 'crossings.json'
++            _event_precision_report(report, [{
++                "pc24": 0x008001,
++                "m": 1,
++                "x": 1,
++                "event": "nmi",
++                "hits": 1,
++                "irq_i_set_hits": 0,
++            }])
++            os.environ[name] = str(report)
++            precise = emit_function(rom, bank=0, start=0x8000,
++                                    entry_m=1, entry_x=1)
++            assert "event-precision function" in precise
++            assert "interp_bridge_lle_yield_unwind(cpu, 0x008000u)" in precise
++
++            wrong_mx = emit_function(rom, bank=0, start=0x8000,
++                                     entry_m=0, entry_x=1)
++            assert "event-precision function" not in wrong_mx
++    finally:
++        os.environ.pop(name, None)
++        if previous is not None:
++            os.environ[name] = previous
++
++
++def test_event_precision_profile_ignores_fully_masked_irq_crossing():
++    rom = make_lorom_bank0({0x8000: bytes([0xEA, 0x60])})
++    name = 'SNESRECOMP_EVENT_PRECISION_PROFILE'
++    previous = os.environ.pop(name, None)
++    try:
++        with tempfile.TemporaryDirectory() as raw:
++            report = pathlib.Path(raw) / 'crossings.json'
++            _event_precision_report(report, [{
++                "pc24": 0x008000,
++                "m": 1,
++                "x": 1,
++                "event": "irq",
++                "hits": 2,
++                "irq_i_set_hits": 2,
++            }])
++            os.environ[name] = str(report)
++            src = emit_function(rom, bank=0, start=0x8000,
++                                entry_m=1, entry_x=1)
++            assert "event-precision function" not in src
++    finally:
++        os.environ.pop(name, None)
++        if previous is not None:
++            os.environ[name] = previous
++
++
++def test_event_precision_profile_rejects_incomplete_audit():
++    rom = make_lorom_bank0({0x8000: bytes([0x60])})
++    name = 'SNESRECOMP_EVENT_PRECISION_PROFILE'
++    previous = os.environ.pop(name, None)
++    try:
++        with tempfile.TemporaryDirectory() as raw:
++            report = pathlib.Path(raw) / 'crossings.json'
++            _event_precision_report(report, [], overflow=1)
++            os.environ[name] = str(report)
++            try:
++                emit_function(rom, bank=0, start=0x8000,
++                              entry_m=1, entry_x=1)
++                assert False, "overflowed audit must be rejected"
++            except ValueError as exc:
++                assert "incomplete" in str(exc)
++    finally:
++        os.environ.pop(name, None)
++        if previous is not None:
++            os.environ[name] = previous
+diff --git a/tools/v2_emit.py b/tools/v2_emit.py
+index e7336ea..187b209 100644
+--- a/tools/v2_emit.py
++++ b/tools/v2_emit.py
+@@ -23,6 +23,7 @@ from snes65816 import (  # noqa: E402
+     register_reloc_region,
+ )
+ from v2.program_analysis import VariantKey  # noqa: E402
++from v2.event_precision import event_precision_profile_digest  # noqa: E402
+ from v2.program_emit import (  # noqa: E402
+     CACHE_FORMAT_VERSION,
+     discover_host_roots,
+@@ -256,9 +257,11 @@ def main() -> int:
+         deny_gate = bool(os.environ.get("SNESRECOMP_EMIT_AOT_DENY_GATE"))
+         event_audit = bool(os.environ.get(
+             "SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"))
++        event_precision = event_precision_profile_digest()
+         return hashlib.sha256(
+             (f"{tree_digest}\0aot_deny_gate={int(deny_gate)}"
+-             f"\0event_crossing_audit={int(event_audit)}").encode()
++             f"\0event_crossing_audit={int(event_audit)}"
++             f"\0event_precision={event_precision}").encode()
+         ).hexdigest()
+ 
+     generator_digest = generator_digest_for(analysis_backend)
+-- 
+2.50.1 (Apple Git-155)
+

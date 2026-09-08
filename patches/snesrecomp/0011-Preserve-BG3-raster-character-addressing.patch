@@ -1,0 +1,98 @@
+From e70e90161acf11f5e502fbfdd283a5c23f7b9953 Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Sun, 6 Sep 2026 11:36:50 +0100
+Subject: [PATCH] Preserve BG3 raster character addressing
+
+---
+ docs/LLE_SCHEDULER.md             |  3 ++-
+ runner/src/snes/ppu.c             |  6 ++++++
+ tests/ppu/ppu_sprite_limit_test.c | 12 +++++++++---
+ 3 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/docs/LLE_SCHEDULER.md b/docs/LLE_SCHEDULER.md
+index acbbec3..d1c2daa 100644
+--- a/docs/LLE_SCHEDULER.md
++++ b/docs/LLE_SCHEDULER.md
+@@ -195,7 +195,8 @@ display state. Call `ppu_rasterBegin()` before running the field, then call
+ `ppu_rasterRenderBegin()` once and `ppu_rasterApplyLine()` before each
+ `ppu_runLine()`. Generated direct writes and emulated B-bus writes both enter
+ the journal, so interpreted CPU, DMA, and HDMA changes are covered. The journal
+-contains display state such as mode, BG1 addressing and scroll, and layer masks.
++contains display state such as mode, BG character addressing, BG1 tilemap and
++scroll, and layer masks.
+ It deliberately excludes VRAM, CGRAM, and OAM data ports because replaying those
+ uploads would apply them twice.
+ 
+diff --git a/runner/src/snes/ppu.c b/runner/src/snes/ppu.c
+index ec9fda8..cbecbac 100644
+--- a/runner/src/snes/ppu.c
++++ b/runner/src/snes/ppu.c
+@@ -2358,6 +2358,7 @@ static int raster_reg_journaled(uint16_t reg) {
+     case 0x2105:                 /* BGMODE */
+     case 0x2107:                 /* BG1SC */
+     case 0x210B:                 /* BG12NBA */
++    case 0x210C:                 /* BG34NBA */
+     case 0x210D: case 0x210E:    /* BG1HOFS / BG1VOFS */
+     case 0x212C: case 0x212E:    /* TM / TMW */
+     case 0x2131:                 /* CGADSUB */
+@@ -2410,6 +2411,11 @@ void ppu_rasterRecord(uint16_t reg, uint16_t line, uint8_t val) {
+         s_raster0.bgTileAdr =
+             (uint16_t)((s_raster0.bgTileAdr & 0xff00u) | val);
+         break;
++      case 0x210C:
++        s_raster0.bgTileAdr =
++            (uint16_t)((s_raster0.bgTileAdr & 0x00ffu) |
++                       ((uint16_t)val << 8));
++        break;
+       case 0x210D:
+         s_raster0.m7h = (int16_t)(((uint16_t)val << 8 |
+                                    s_raster0.m7prev) & 0x1FFF);
+diff --git a/tests/ppu/ppu_sprite_limit_test.c b/tests/ppu/ppu_sprite_limit_test.c
+index 56003de..9f341a5 100644
+--- a/tests/ppu/ppu_sprite_limit_test.c
++++ b/tests/ppu/ppu_sprite_limit_test.c
+@@ -579,7 +579,7 @@ int main(void) {
+         ppu_reset(ppu);
+         ppu->bgmode = 1;
+         ppu->bgXsc[0] = 0x48;
+-        ppu->bgTileAdr = 0x0555;
++        ppu->bgTileAdr = 0x0055;
+         ppu->screenEnabled[0] = 0x13;
+         ppu_rasterBegin(ppu);
+ 
+@@ -592,6 +592,8 @@ int main(void) {
+         raster_write(ppu, 0x210E, 0, 0x00);
+         raster_write(ppu, 0x212C, 0, 0x11);
+ 
++        raster_write(ppu, 0x210C, 60, 0x05);
++
+         raster_write(ppu, 0x2105, 120, 0x01);
+         raster_write(ppu, 0x2107, 120, 0x48);
+         raster_write(ppu, 0x210B, 120, 0x55);
+@@ -603,7 +605,7 @@ int main(void) {
+ 
+         ppu_rasterRenderBegin(ppu);
+         failures += check(ppu->bgmode == 7 && ppu->bgXsc[0] == 0x43 &&
+-                              (ppu->bgTileAdr & 0xff) == 0x50,
++                              ppu->bgTileAdr == 0x0050,
+                           "raster baseline restores Mode 7 addressing");
+         failures += check(ppu->hScroll[0] == 128 && ppu->vScroll[0] == 184 &&
+                               ppu->m7matrix[6] == 128 &&
+@@ -612,9 +614,13 @@ int main(void) {
+         failures += check(ppu->screenEnabled[0] == 0x11,
+                           "raster baseline restores top-band layers");
+ 
++        ppu_rasterApplyLine(ppu, 60);
++        failures += check(ppu->bgTileAdr == 0x0550,
++                          "raster replay preserves active-display BG3 addressing");
++
+         ppu_rasterApplyLine(ppu, 120);
+         failures += check(ppu->bgmode == 1 && ppu->bgXsc[0] == 0x48 &&
+-                              (ppu->bgTileAdr & 0xff) == 0x55,
++                              ppu->bgTileAdr == 0x0555,
+                           "raster split restores Mode 1 addressing");
+         failures += check(ppu->hScroll[0] == 0 && ppu->vScroll[0] == 0 &&
+                               ppu->m7matrix[6] == 0 &&
+-- 
+2.50.1 (Apple Git-155)
+
