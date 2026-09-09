@@ -57,6 +57,6 @@ void SuperTennisKeyBindsDefaults(uint32_t *map, int n);
 /* Seed `path` (keybinds.ini) with the host's default layout when missing. */
 void SuperTennisKeyBindsWriteDefaults(const char *path);
 
-/* Apply [player1] of `path` over `map` (restart-to-apply, like the launcher's
- * own keybinds.ini contract). */
-void SuperTennisKeyBindsLoad(const char *path, uint32_t *map, int n);
+/* Apply [player1]/[player2] of `path` over `maps[2]` (restart-to-apply,
+ * like the launcher's own keybinds.ini contract). */
+void SuperTennisKeyBindsLoad(const char *path, uint32_t *maps[2], int n);

@@ -32,11 +32,34 @@
 #define SNES_W 256
 #define SNES_H 224
 
+/* Per-device Select+Start chord tracking; matches the two gamepad slots the
+ * desktop host maintains in src/main.c. */
+#define ST_PAD_CHORD_COUNT 2
+
+typedef struct PadChord {
+    SDL_JoystickID id;  /* device this state belongs to; -1 = unused */
+    int start_down;
+    int select_down;
+} PadChord;
+
+static PadChord *PadChordFor(PadChord *chords, SDL_JoystickID id) {
+    for (int i = 0; i < ST_PAD_CHORD_COUNT; i++)
+        if (chords[i].id == id) return &chords[i];
+    for (int i = 0; i < ST_PAD_CHORD_COUNT; i++)
+        if (chords[i].id == (SDL_JoystickID)-1) {
+            chords[i].id = id;
+            return &chords[i];
+        }
+    return &chords[0];  /* all slots full: fold into the first */
+}
+
 /* Title-specific semantic keys (the standard RECOMP_RUNTIME_UI_KEY_* values
  * are used where the shared catalog already has a matching setting). */
 #define ST_KEY_STRETCH       "graphics.stretch_to_fill"
 #define ST_KEY_P1_SOURCE     "input.player1_source"
 #define ST_KEY_P1_DEADZONE   "input.player1_deadzone"
+#define ST_KEY_P2_SOURCE     "input.player2_source"
+#define ST_KEY_P2_DEADZONE   "input.player2_deadzone"
 #define ST_KEY_SKIP_LAUNCHER "system.skip_launcher"
 
 struct SuperTennisRuntimeUi {
@@ -46,10 +69,10 @@ struct SuperTennisRuntimeUi {
     SDL_Texture *texture;
     SDL_AudioStream *audio_stream;
     RecompRuntimeUi *ui;
-    /* Physical gamepad state (menu closed) so Select+Start — not Start alone
-     * — can be the open chord without stealing Start from the game. */
-    int pad_start_down;
-    int pad_select_down;
+    /* Physical gamepad state per device (menu closed) so Select+Start — not
+     * Start alone — can be the open chord without stealing Start from the
+     * game. Kept per pad so either gamepad can open the menu. */
+    PadChord pad_chords[ST_PAD_CHORD_COUNT];
 };
 
 /* SDL3 renamed the controller EVENT constants (SDL_EVENT_CONTROLLER_* ->
@@ -95,7 +118,13 @@ static const RecompRuntimeUiItem kItems[] = {
      "None, keyboard, or gamepad for player 1.", RECOMP_RUNTIME_UI_CHOICE,
      0, 2, 1, kPlayerSourceChoices, 3, kPlayerSourceValues},
     {ST_KEY_P1_DEADZONE, "Input", "Stick Deadzone",
-     "Gamepad stick deadzone, percent.", RECOMP_RUNTIME_UI_INT,
+     "Gamepad stick deadzone for player 1, percent.", RECOMP_RUNTIME_UI_INT,
+     0, 100, 5, NULL, 0, NULL},
+    {ST_KEY_P2_SOURCE, "Input", "Player 2 Source",
+     "None, keyboard, or gamepad for player 2.", RECOMP_RUNTIME_UI_CHOICE,
+     0, 2, 1, kPlayerSourceChoices, 3, kPlayerSourceValues},
+    {ST_KEY_P2_DEADZONE, "Input", "P2 Stick Deadzone",
+     "Gamepad stick deadzone for player 2, percent.", RECOMP_RUNTIME_UI_INT,
      0, 100, 5, NULL, 0, NULL},
     /* System */
     {ST_KEY_SKIP_LAUNCHER, "System", "Skip Launcher",
@@ -126,6 +155,10 @@ static int GetValue(void *context, const RecompRuntimeUiItem *item,
     *value_out = s->player_src[0];
   else if (!strcmp(item->key, ST_KEY_P1_DEADZONE))
     *value_out = s->deadzone[0];
+  else if (!strcmp(item->key, ST_KEY_P2_SOURCE))
+    *value_out = s->player_src[1];
+  else if (!strcmp(item->key, ST_KEY_P2_DEADZONE))
+    *value_out = s->deadzone[1];
   else if (!strcmp(item->key, ST_KEY_SKIP_LAUNCHER))
     *value_out = s->skip_launcher;
   else
@@ -155,11 +188,17 @@ static int SetValue(void *context, const RecompRuntimeUiItem *item,
     if (rt->audio_stream)
       SDL_SetAudioStreamGain(rt->audio_stream, (float)s->volume / 100.0f);
   } else if (!strcmp(item->key, ST_KEY_P1_SOURCE)) {
-    /* Applied live by main.c, which syncs the gamepad each loop iteration. */
+    /* Applied live by main.c, which syncs the gamepads each loop iteration. */
     s->player_src[0] = value;
   } else if (!strcmp(item->key, ST_KEY_P1_DEADZONE)) {
     /* Read live by ApplyStickToDpad in main.c. */
     s->deadzone[0] = value < 0 ? 0 : (value > 100 ? 100 : value);
+  } else if (!strcmp(item->key, ST_KEY_P2_SOURCE)) {
+    /* Applied live by main.c, which syncs the gamepads each loop iteration. */
+    s->player_src[1] = value;
+  } else if (!strcmp(item->key, ST_KEY_P2_DEADZONE)) {
+    /* Read live by ApplyStickToDpad in main.c. */
+    s->deadzone[1] = value < 0 ? 0 : (value > 100 ? 100 : value);
   } else if (!strcmp(item->key, ST_KEY_SKIP_LAUNCHER)) {
     s->skip_launcher = value != 0;
   } else {
@@ -181,6 +220,8 @@ static int IsEnabled(void *context, const RecompRuntimeUiItem *item) {
   SuperTennisRuntimeUi *rt = (SuperTennisRuntimeUi *)context;
   if (!strcmp(item->key, ST_KEY_P1_DEADZONE))
     return rt->settings->player_src[0] == 2;
+  if (!strcmp(item->key, ST_KEY_P2_DEADZONE))
+    return rt->settings->player_src[1] == 2;
   return 1;
 }
 
@@ -216,6 +257,9 @@ SuperTennisRuntimeUi *SuperTennisRuntimeUiCreate(
   rt->renderer = renderer;
   rt->texture = texture;
   rt->audio_stream = audio_stream;
+
+  for (int i = 0; i < ST_PAD_CHORD_COUNT; i++)
+    rt->pad_chords[i].id = (SDL_JoystickID)-1;
 
   RecompRuntimeUiConfig config;
   memset(&config, 0, sizeof(config));
@@ -289,12 +333,16 @@ int SuperTennisRuntimeUiHandleEvent(SuperTennisRuntimeUi *rt,
   case ST_EVENT_BUTTON_UP: {
     pressed = event->type == ST_EVENT_BUTTON_DOWN;
     const int button = SNESRECOMP_SDL_EVENT_BUTTON(*event);
-    /* Track the physical pad state regardless of the menu, so the closed
-     * menu can detect the Select+Start open chord below. */
+    /* Track the physical pad state per device regardless of the menu, so the
+     * closed menu can detect the Select+Start open chord below on whichever
+     * pad the player uses. */
+    PadChord *chord =
+        PadChordFor(rt->pad_chords,
+                    SNESRECOMP_SDL_EVENT_BUTTON_DEVICE(*event));
     if (button == SDL_CONTROLLER_BUTTON_START)
-      rt->pad_start_down = pressed;
+      chord->start_down = pressed;
     else if (button == SDL_CONTROLLER_BUTTON_BACK) /* the Select button */
-      rt->pad_select_down = pressed;
+      chord->select_down = pressed;
     if (!open) {
       /* Menu closed: only the Select+Start chord opens it; every other pad
        * input — including Start alone, the game's pause/menu button — is the
@@ -302,7 +350,7 @@ int SuperTennisRuntimeUiHandleEvent(SuperTennisRuntimeUi *rt,
       if (pressed && !repeat &&
           (button == SDL_CONTROLLER_BUTTON_START ||
            button == SDL_CONTROLLER_BUTTON_BACK) &&
-          rt->pad_select_down && rt->pad_start_down) {
+          chord->select_down && chord->start_down) {
         return recomp_runtime_ui_handle_input(
                    ui, RECOMP_RUNTIME_UI_INPUT_TOGGLE, 1, 0) != 0;
       }

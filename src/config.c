@@ -13,9 +13,9 @@
  * keybinds.ini is the file the recomp-ui Controller page edits ([player1] /
  * [player2], SDL scancode names). This host seeds it with its own keyboard
  * layout when the file is missing (so first-run matches the pre-launcher
- * host) and then applies [player1] onto a scancode -> runner input-bit map
- * at boot. Edits from the launcher apply on the next launch, matching the
- * file's own "Restart the game to apply" contract.
+ * host) and then applies [player1] and [player2] onto per-player scancode ->
+ * runner input-bit maps at boot. Edits from the launcher apply on the next
+ * launch, matching the file's own "Restart the game to apply" contract.
  */
 #include "config.h"
 
@@ -331,40 +331,43 @@ void SuperTennisKeyBindsWriteDefaults(const char *path) {
     fclose(f);
 }
 
-void SuperTennisKeyBindsLoad(const char *path, uint32_t *map, int n) {
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    int in_p1 = 0;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        char *p = StTrim(line);
-        if (!p[0] || p[0] == '#' || p[0] == ';') continue;
-        if (p[0] == '[') {
-            char *end = strchr(p, ']');
-            if (end) *end = '\0';
-            in_p1 = StStrEqNoCase(p + 1, "player1");
-            continue;
-        }
-        if (!in_p1) continue;
-        char *eq = strchr(p, '=');
-        if (!eq) continue;
-        *eq = '\0';
-        char *key = StTrim(p);
-        char *val = StTrim(eq + 1);
-        SDL_Scancode sc = SDL_GetScancodeFromName(val);
-        if (sc == SDL_SCANCODE_UNKNOWN) continue;
-        if ((int)sc >= 0 && (int)sc < n) {
-            for (size_t i = 0; i < sizeof(kKeyBindNames) / sizeof(kKeyBindNames[0]); i++) {
-                if (StStrEqNoCase(key, kKeyBindNames[i].name)) {
-                    /* Moving a button to a new key releases its old one. */
-                    uint32_t bit = kKeyBindNames[i].bit;
-                    for (int j = 0; j < n; j++)
-                        if (map[j] == bit) map[j] = 0;
-                    map[(int)sc] = bit;
-                    break;
-                }
-            }
-        }
+void SuperTennisKeyBindsLoad(const char *path, uint32_t *maps[2], int n) {
+  FILE *f = fopen(path, "r");
+  if (!f) return;
+  /* -1 outside [player1]/[player2]; 0 = player 1, 1 = player 2. */
+  int player = -1;
+  char line[256];
+  while (fgets(line, sizeof(line), f)) {
+    char *p = StTrim(line);
+    if (!p[0] || p[0] == '#' || p[0] == ';') continue;
+    if (p[0] == '[') {
+      char *end = strchr(p, ']');
+      if (end) *end = '\0';
+      if (StStrEqNoCase(p + 1, "player1")) player = 0;
+      else if (StStrEqNoCase(p + 1, "player2")) player = 1;
+      else player = -1;
+      continue;
     }
-    fclose(f);
+    if (player < 0 || player > 1) continue;
+    char *eq = strchr(p, '=');
+    if (!eq) continue;
+    *eq = '\0';
+    char *key = StTrim(p);
+    char *val = StTrim(eq + 1);
+    SDL_Scancode sc = SDL_GetScancodeFromName(val);
+    if (sc == SDL_SCANCODE_UNKNOWN) continue;
+    if ((int)sc >= 0 && (int)sc < n) {
+      for (size_t i = 0; i < sizeof(kKeyBindNames) / sizeof(kKeyBindNames[0]); i++) {
+        if (StStrEqNoCase(key, kKeyBindNames[i].name)) {
+          /* Moving a button to a new key releases its old one. */
+          uint32_t bit = kKeyBindNames[i].bit;
+          for (int j = 0; j < n; j++)
+            if (maps[player][j] == bit) maps[player][j] = 0;
+          maps[player][(int)sc] = bit;
+          break;
+        }
+      }
+    }
+  }
+  fclose(f);
 }

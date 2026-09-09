@@ -22,14 +22,17 @@
  * an explicit positional ROM, or SNESRECOMP_NO_LAUNCHER; those resolve the
  * ROM through the shared resolver and boot straight into the game.
  *
- * Input layout (runner 12-bit word, see debug_server k_controller_names):
- *   B=0x001 Y=0x002 SELECT=0x004 START=0x008 UP=0x010 DOWN=0x020
- *   LEFT=0x040 RIGHT=0x080 A=0x100 X=0x200 L=0x400 R=0x800
- * Keys: Z=B X=A A=Y S=X Q=L E=R Enter=Start Backspace=Select arrows=D-pad.
- * The layout lives in keybinds.ini (edited from the launcher's Controller
- * page; restart to apply). Gamepad (when player_src[0] == 2): bottom=B
- * right=A left=Y top=X, L/R shoulders, Start/Select, D-pad, left stick acts
- * as D-pad.
+ * Input layout (runner 12-bit word per port, see debug_server
+ * k_controller_names): B=0x001 Y=0x002 SELECT=0x004 START=0x008 UP=0x010
+ * DOWN=0x020 LEFT=0x040 RIGHT=0x080 A=0x100 X=0x200 L=0x400 R=0x800. The
+ * runner word packs player 1 in bits 0..11 and player 2 in bits 12..23;
+ * RtlRunFrame feeds them to SNES ports 1 and 2 ($4218/$421A).
+ * Keys (P1): Z=B X=A A=Y S=X Q=L E=R Enter=Start Backspace=Select arrows=D-pad.
+ * The per-player layouts live in keybinds.ini [player1]/[player2] (edited
+ * from the launcher's Controller page; restart to apply). Player 2 starts
+ * unbound; pick its keys on the same page. Gamepad (when player_src[p] == 2):
+ * bottom=B right=A left=Y top=X, L/R shoulders, Start/Select, D-pad, left
+ * stick acts as D-pad. Pads are assigned to players in connection order.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,16 +188,21 @@ static int InitAudio(int freq) {
 
 /* ── input ─────────────────────────────────────────────────────────────── */
 
-static uint32 g_input_state;
+#define ST_PLAYER_COUNT 2
 
-static void SetKeyBit(uint32 bit, bool down) {
-  if (down) g_input_state |= bit;
-  else g_input_state &= ~bit;
+/* Live input bits per player (12-bit SNES controller word each). Packed into
+ * the runner word as p1 | (p2 << 12) before each RtlRunFrame. */
+static uint32 g_input_state[ST_PLAYER_COUNT];
+
+static void SetKeyBit(int player, uint32 bit, bool down) {
+  if (down) g_input_state[player] |= bit;
+  else g_input_state[player] &= ~bit;
 }
 
-/* Keyboard layout: scancode -> runner input bit. Seeded with the defaults
- * below and overridden by keybinds.ini [player1] (see config.c). */
-static uint32_t g_key_bind[SDL_NUM_SCANCODES];
+/* Keyboard layout per player: scancode -> runner input bit. Seeded with the
+ * defaults below and overridden by keybinds.ini [player1]/[player2] (see
+ * config.c). */
+static uint32_t g_key_bind[ST_PLAYER_COUNT][SDL_NUM_SCANCODES];
 
 #if SNESRECOMP_SDL3
 #define ST_EVENT_SCANCODE(event) ((event).key.scancode)
@@ -202,19 +210,105 @@ static uint32_t g_key_bind[SDL_NUM_SCANCODES];
 #define ST_EVENT_SCANCODE(event) ((event).key.keysym.scancode)
 #endif
 
-static void HandleKey(SDL_Scancode sc, bool down) {
+static void HandleKey(int player, SDL_Scancode sc, bool down) {
+  if (player < 0 || player >= ST_PLAYER_COUNT) return;
   if ((int)sc >= 0 && (int)sc < SDL_NUM_SCANCODES) {
-    uint32 bit = g_key_bind[sc];
-    if (bit) SetKeyBit(bit, down);
+    uint32 bit = g_key_bind[player][sc];
+    if (bit) SetKeyBit(player, bit, down);
   }
 }
 
-/* ── gamepad input (P1 only; active when player_src[0] == 2) ──────────── */
+/* ── gamepad input (per player; active when player_src[p] == 2) ────────── */
 
-static SDL_Gamepad *g_gamepad;
-static bool g_gamepad_wanted;
-static Sint16 g_stick_x;
-static Sint16 g_stick_y;
+typedef struct GamepadSlot {
+  SDL_Gamepad *pad;   /* open when wanted && a device is assigned */
+  SDL_JoystickID id;  /* assigned device; only meaningful while pad is open */
+  bool wanted;        /* player_src[p] == 2 */
+  Sint16 stick_x;
+  Sint16 stick_y;
+} GamepadSlot;
+
+static GamepadSlot g_pads[ST_PLAYER_COUNT];
+
+static SDL_JoystickID GamepadJoystickId(SDL_Gamepad *pad) {
+#if SNESRECOMP_SDL3
+  return SDL_GetGamepadID(pad);
+#else
+  return SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pad));
+#endif
+}
+
+/* Player slot holding `id`, or -1 when that device is not assigned. */
+static int PadSlotForId(SDL_JoystickID id) {
+  for (int p = 0; p < ST_PLAYER_COUNT; p++)
+    if (g_pads[p].pad && g_pads[p].id == id) return p;
+  return -1;
+}
+
+/* Assign `pad` to the first wanted player with a free slot (connection
+ * order). Returns 1 when assigned; the caller closes it otherwise. */
+static int AssignGamepad(SDL_Gamepad *pad, SDL_JoystickID id) {
+  for (int p = 0; p < ST_PLAYER_COUNT; p++) {
+    if (g_pads[p].wanted && !g_pads[p].pad) {
+      g_pads[p].pad = pad;
+      g_pads[p].id = id;
+      g_pads[p].stick_x = 0;
+      g_pads[p].stick_y = 0;
+      fprintf(stderr, "gamepad assigned to player %d\n", p + 1);
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static SDL_Gamepad *OpenGamepadDevice(SDL_JoystickID id) {
+  SDL_Gamepad *pad = NULL;
+#if SNESRECOMP_SDL3
+  pad = SDL_OpenGamepad(id);
+#else
+  for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+    if (SDL_JoystickGetDeviceInstanceID(i) == id) {
+      pad = SDL_GameControllerOpen(i);
+      break;
+    }
+  }
+#endif
+  if (!pad) fprintf(stderr, "SDL_OpenGamepad failed: %s\n", SDL_GetError());
+  return pad;
+}
+
+/* Open `id` into the first wanted player with a free slot; close it when no
+ * player needs it. */
+static void OpenGamepadForId(SDL_JoystickID id) {
+  SDL_Gamepad *pad = OpenGamepadDevice(id);
+  if (pad && !AssignGamepad(pad, id)) SDL_CloseGamepad(pad);
+}
+
+static void OpenConnectedGamepads(void) {
+#if SNESRECOMP_SDL3
+  int count = 0;
+  SDL_JoystickID *pads = SDL_GetGamepads(&count);
+  for (int i = 0; i < count; ++i)
+    if (PadSlotForId(pads[i]) < 0) OpenGamepadForId(pads[i]);
+  SDL_free(pads);
+#else
+  for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+    if (!SDL_IsGameController(i)) continue;
+    SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+    if (PadSlotForId(id) >= 0) continue;
+    SDL_Gamepad *pad = SDL_GameControllerOpen(i);
+    if (!pad) {
+      fprintf(stderr, "SDL_OpenGamepad failed: %s\n", SDL_GetError());
+      continue;
+    }
+    if (!AssignGamepad(pad, GamepadJoystickId(pad))) SDL_CloseGamepad(pad);
+  }
+#endif
+  for (int p = 0; p < ST_PLAYER_COUNT; p++)
+    if (g_pads[p].wanted && !g_pads[p].pad)
+      fprintf(stderr, "gamepad requested for player %d but none available\n",
+              p + 1);
+}
 
 /* SDL3 renamed the controller EVENT constants (SDL_EVENT_CONTROLLER_* ->
  * SDL_EVENT_GAMEPAD_*); SDL2 only has the old names. The button/axis enums
@@ -234,37 +328,6 @@ static Sint16 g_stick_y;
 #define ST_EVENT_AXIS_MOTION     SDL_EVENT_CONTROLLER_AXIS_MOTION
 #endif
 
-static void OpenGamepadForId(SDL_JoystickID id) {
-#if SNESRECOMP_SDL3
-  g_gamepad = SDL_OpenGamepad(id);
-#else
-  for (int i = 0; i < SDL_NumJoysticks(); ++i) {
-    if (SDL_JoystickGetDeviceInstanceID(i) == id) {
-      g_gamepad = SDL_GameControllerOpen(i);
-      break;
-    }
-  }
-#endif
-  if (!g_gamepad)
-    fprintf(stderr, "SDL_OpenGamepad failed: %s\n", SDL_GetError());
-}
-
-static void OpenConnectedGamepads(void) {
-  if (!g_gamepad_wanted || g_gamepad) return;
-#if SNESRECOMP_SDL3
-  int count = 0;
-  SDL_JoystickID *pads = SDL_GetGamepads(&count);
-  for (int i = 0; i < count && !g_gamepad; ++i)
-    g_gamepad = SDL_OpenGamepad(pads[i]);
-  SDL_free(pads);
-#else
-  for (int i = 0; i < SDL_NumJoysticks() && !g_gamepad; ++i)
-    if (SDL_IsGameController(i)) g_gamepad = SDL_GameControllerOpen(i);
-#endif
-  if (!g_gamepad)
-    fprintf(stderr, "gamepad requested but none connected; input disabled\n");
-}
-
 static uint32 GamepadButtonBit(int button) {
   switch (button) {
   case SDL_CONTROLLER_BUTTON_A: return 0x001; /* B (bottom) */
@@ -283,14 +346,14 @@ static uint32 GamepadButtonBit(int button) {
   }
 }
 
-static void ApplyStickToDpad(int deadzone_pct) {
+static void ApplyStickToDpad(int player, int deadzone_pct) {
   int dz = (deadzone_pct * 32767) / 100;
   if (dz < 0) dz = 0;
   if (dz > 32767) dz = 32767;
-  SetKeyBit(0x010, g_stick_y < -dz); /* UP (stick up is negative Y) */
-  SetKeyBit(0x020, g_stick_y > dz);  /* DOWN */
-  SetKeyBit(0x040, g_stick_x < -dz); /* LEFT */
-  SetKeyBit(0x080, g_stick_x > dz);  /* RIGHT */
+  SetKeyBit(player, 0x010, g_pads[player].stick_y < -dz); /* UP (stick up is negative Y) */
+  SetKeyBit(player, 0x020, g_pads[player].stick_y > dz);  /* DOWN */
+  SetKeyBit(player, 0x040, g_pads[player].stick_x < -dz); /* LEFT */
+  SetKeyBit(player, 0x080, g_pads[player].stick_x > dz);  /* RIGHT */
 }
 
 /* ── rom loading ───────────────────────────────────────────────────────── */
@@ -366,9 +429,11 @@ int main(int argc, char **argv) {
   rom_path[0] = '\0';
   int rom_resolved = 0;
 
-  /* Keyboard layout: defaults now; keybinds.ini [player1] overrides once the
-   * cwd is anchored to the exe dir below (RECOMP_LAUNCHER builds). */
-  SuperTennisKeyBindsDefaults(g_key_bind, SDL_NUM_SCANCODES);
+  /* Keyboard layout: defaults now; keybinds.ini [player1]/[player2] overrides
+   * once the cwd is anchored to the exe dir below (RECOMP_LAUNCHER builds).
+   * Player 2 starts unbound; the launcher's Controller page edits its keys. */
+  SuperTennisKeyBindsDefaults(g_key_bind[0], SDL_NUM_SCANCODES);
+  memset(g_key_bind[1], 0, sizeof(g_key_bind[1]));
 
   /* Resolver argument: an explicit positional ROM, else the historical
    * reference/ default when it is present. Absolutized BEFORE the cwd anchor
@@ -405,7 +470,10 @@ int main(int argc, char **argv) {
       SuperTennisKeyBindsWriteDefaults("keybinds.ini");
     }
   }
-  SuperTennisKeyBindsLoad("keybinds.ini", g_key_bind, SDL_NUM_SCANCODES);
+  {
+    uint32_t *key_maps[ST_PLAYER_COUNT] = {g_key_bind[0], g_key_bind[1]};
+    SuperTennisKeyBindsLoad("keybinds.ini", key_maps, SDL_NUM_SCANCODES);
+  }
 
   /* Deterministic/scripted runs never show the window: --replay, an explicit
    * frame cap, a positional ROM, or SNESRECOMP_NO_LAUNCHER. */
@@ -457,7 +525,7 @@ int main(int argc, char **argv) {
     gi.name = "Super Tennis";
     gi.region = "(USA)";
     gi.sram_path = "saves/save.srm";
-    gi.num_players = 1;
+    gi.num_players = 2;
     gi.config_path = "config.ini";  /* hotkey editor target */
     gi.widescreen_supported = 0;
     gi.adaptive_view_supported = 0;
@@ -545,7 +613,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  g_gamepad_wanted = (settings.player_src[0] == 2);
+  for (int p = 0; p < ST_PLAYER_COUNT; p++)
+    g_pads[p].wanted = (settings.player_src[p] == 2);
   OpenConnectedGamepads();
 
   int win_scale = settings.window_scale < 1 ? 1 : settings.window_scale;
@@ -678,7 +747,9 @@ int main(int argc, char **argv) {
 #endif
         if (event.key.repeat) break;
         if (event.key.key == SDLK_ESCAPE) running = false;
-        if (settings.player_src[0] == 1) HandleKey(ST_EVENT_SCANCODE(event), true);
+        for (int p = 0; p < ST_PLAYER_COUNT; p++)
+          if (settings.player_src[p] == 1)
+            HandleKey(p, ST_EVENT_SCANCODE(event), true);
         break;
       }
       case SDL_EVENT_KEY_UP:
@@ -687,25 +758,25 @@ int main(int argc, char **argv) {
             SuperTennisRuntimeUiHandleEvent(g_runtime_ui, &event))
           break;
 #endif
-        if (settings.player_src[0] == 1) HandleKey(ST_EVENT_SCANCODE(event), false);
+        for (int p = 0; p < ST_PLAYER_COUNT; p++)
+          if (settings.player_src[p] == 1)
+            HandleKey(p, ST_EVENT_SCANCODE(event), false);
         break;
       case ST_EVENT_DEVICE_ADDED:
-        if (g_gamepad_wanted && !g_gamepad)
-          OpenGamepadForId(SNESRECOMP_SDL_EVENT_DEVICE(event));
+        /* Opens into the first wanted player with a free slot; a device no
+         * player wants is opened then closed. */
+        OpenGamepadForId(SNESRECOMP_SDL_EVENT_DEVICE(event));
         break;
-      case ST_EVENT_DEVICE_REMOVED:
-#if SNESRECOMP_SDL3
-        if (g_gamepad && SDL_GetGamepadID(g_gamepad) ==
-                             SNESRECOMP_SDL_EVENT_DEVICE(event)) {
-#else
-        if (g_gamepad && SDL_JoystickInstanceID(
-                             SDL_GameControllerGetJoystick(g_gamepad)) ==
-                             SNESRECOMP_SDL_EVENT_DEVICE(event)) {
-#endif
-          SDL_CloseGamepad(g_gamepad);
-          g_gamepad = NULL;
+      case ST_EVENT_DEVICE_REMOVED: {
+        int slot = PadSlotForId(SNESRECOMP_SDL_EVENT_DEVICE(event));
+        if (slot >= 0) {
+          SDL_CloseGamepad(g_pads[slot].pad);
+          g_pads[slot].pad = NULL;
+          g_pads[slot].stick_x = 0;
+          g_pads[slot].stick_y = 0;
         }
         break;
+      }
       case ST_EVENT_BUTTON_DOWN:
       case ST_EVENT_BUTTON_UP: {
 #if defined(RECOMP_LAUNCHER) && SNESRECOMP_SDL3
@@ -713,9 +784,10 @@ int main(int argc, char **argv) {
             SuperTennisRuntimeUiHandleEvent(g_runtime_ui, &event))
           break;
 #endif
-        if (!g_gamepad_wanted || !g_gamepad) break;
+        int slot = PadSlotForId(SNESRECOMP_SDL_EVENT_BUTTON_DEVICE(event));
+        if (slot < 0) break;
         uint32 bit = GamepadButtonBit(SNESRECOMP_SDL_EVENT_BUTTON(event));
-        if (bit) SetKeyBit(bit, event.type == ST_EVENT_BUTTON_DOWN);
+        if (bit) SetKeyBit(slot, bit, event.type == ST_EVENT_BUTTON_DOWN);
         break;
       }
       case ST_EVENT_AXIS_MOTION:
@@ -724,14 +796,15 @@ int main(int argc, char **argv) {
             SuperTennisRuntimeUiHandleEvent(g_runtime_ui, &event))
           break;
 #endif
-        if (!g_gamepad_wanted || !g_gamepad) break;
+        int slot = PadSlotForId(SNESRECOMP_SDL_EVENT_AXIS_DEVICE(event));
+        if (slot < 0) break;
         if (SNESRECOMP_SDL_EVENT_AXIS(event) == SDL_CONTROLLER_AXIS_LEFTX)
-          g_stick_x = SNESRECOMP_SDL_EVENT_AXIS_VALUE(event);
+          g_pads[slot].stick_x = SNESRECOMP_SDL_EVENT_AXIS_VALUE(event);
         else if (SNESRECOMP_SDL_EVENT_AXIS(event) == SDL_CONTROLLER_AXIS_LEFTY)
-          g_stick_y = SNESRECOMP_SDL_EVENT_AXIS_VALUE(event);
+          g_pads[slot].stick_y = SNESRECOMP_SDL_EVENT_AXIS_VALUE(event);
         else
           break;
-        ApplyStickToDpad(settings.deadzone[0]);
+        ApplyStickToDpad(slot, settings.deadzone[slot]);
         break;
 #if defined(RECOMP_LAUNCHER) && SNESRECOMP_SDL3
       case SDL_EVENT_MOUSE_MOTION:
@@ -763,15 +836,19 @@ int main(int argc, char **argv) {
     /* A game key/button held when the menu opened was released into the menu
      * (withheld), so its game-input bit would otherwise stay set forever. */
     if (prev_overlay_open && !overlay_open) {
-      g_input_state = 0;
-      g_stick_x = 0;
-      g_stick_y = 0;
+      for (int p = 0; p < ST_PLAYER_COUNT; p++) {
+        g_input_state[p] = 0;
+        g_pads[p].stick_x = 0;
+        g_pads[p].stick_y = 0;
+      }
     }
     prev_overlay_open = overlay_open;
 #endif
     if (!overlay_open) {
       ++host_frame_number;
-      uint32 frame_input = g_input_state;
+      /* Player 2 sits in bits 12..23 of the runner word; a player whose
+       * source is None keeps its word zero, so the pack is always safe. */
+      uint32 frame_input = g_input_state[0] | (g_input_state[1] << 12);
       if (replay_path &&
           !snes_input_replay_next(&replay, NULL, &frame_input)) {
         running = false;
@@ -808,14 +885,16 @@ int main(int argc, char **argv) {
     SDL_RenderPresent(g_renderer);
 
     /* Live input-source switch from the overlay menu. */
-    {
-      bool want_pad = settings.player_src[0] == 2;
-      if (want_pad != g_gamepad_wanted) {
-        g_gamepad_wanted = want_pad;
+    for (int p = 0; p < ST_PLAYER_COUNT; p++) {
+      bool want_pad = settings.player_src[p] == 2;
+      if (want_pad != g_pads[p].wanted) {
+        g_pads[p].wanted = want_pad;
         if (!want_pad) {
-          if (g_gamepad) {
-            SDL_CloseGamepad(g_gamepad);
-            g_gamepad = NULL;
+          if (g_pads[p].pad) {
+            SDL_CloseGamepad(g_pads[p].pad);
+            g_pads[p].pad = NULL;
+            g_pads[p].stick_x = 0;
+            g_pads[p].stick_y = 0;
           }
         } else {
           OpenConnectedGamepads();
@@ -844,7 +923,8 @@ int main(int argc, char **argv) {
 
   Tier2CoverageWriteDefaultManifest("super-tennis");
 
-  if (g_gamepad) SDL_CloseGamepad(g_gamepad);
+  for (int p = 0; p < ST_PLAYER_COUNT; p++)
+    if (g_pads[p].pad) SDL_CloseGamepad(g_pads[p].pad);
 #if defined(RECOMP_LAUNCHER) && SNESRECOMP_SDL3
   if (g_runtime_ui) SuperTennisRuntimeUiDestroy(g_runtime_ui);
   if (g_runtime_imgui) st_imgui_destroy(g_runtime_imgui);

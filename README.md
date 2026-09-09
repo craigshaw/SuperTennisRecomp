@@ -29,7 +29,7 @@ Development is ongoing, and not every game mode or situation has been tested. Wa
 - Windowed and fullscreen display modes
 - Video filtering, audio, and input settings
 - In-game settings menu opened with `F1`
-- Keyboard and gamepad support
+- One and two player local play with keyboard and gamepad support
 - Deterministic headless runner for regression testing
 
 ## Quick start
@@ -74,8 +74,9 @@ The build tools and launcher reject any ROM that does not match this identity.
 | Quit game (settings closed) | `Esc` |
 
 To use an SDL-compatible gamepad, connect it and select it as the input source
-for player 1 on the launcher's Controller page. You can also switch between
-Keyboard and Gamepad under **Input > Player 1 Source** in the `F1` menu.
+for a player on the launcher's Controller page. You can also switch between
+Keyboard and Gamepad under **Input > Player N Source** in the `F1` menu.
+
 
 The settings menu pauses gameplay. Press `F1` again to resume, or use `Esc`
 to back out of the menu. On a gamepad, press Select and Start together to open
@@ -222,10 +223,12 @@ restores SDL3 automatically.
 
 ### The keyboard or gamepad does not respond
 
-Check **Input > Player 1 Source** in the `F1` menu. Select Keyboard or Gamepad
-as appropriate; None disables player input. For a gamepad, connect it before
-launching the application. If keyboard bindings were changed, restart the
-application to load them.
+Check **Input > Player 1 Source** (or Player 2 Source) in the `F1` menu.
+Select Keyboard or Gamepad as appropriate; None disables that player's input.
+For a gamepad, connect it before launching the application. If keyboard
+bindings were changed, restart the application to load them. For two
+players on gamepads, connect them in player order so each pad lands in the
+right slot.
 
 ### Reset settings or choose a different ROM
 
