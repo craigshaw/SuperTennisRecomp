@@ -69,7 +69,14 @@ a reproducible private product; do not weaken `.gitignore` to publish it.
    scheduling. Use the lab only when the resulting question needs an
    independent bounded Mesen observation.
 
-Before handing work on, run `sh tools/check-publication-boundary.sh`, the
-snesrecomp Python v2 suite, the shared C suite, and the relevant title replay.
-After changing patch application or generation glue, also run
+Use focused checks during iteration. Reuse verified unchanged controls; expand
+testing for a concrete failure, coverage gap, or final integration milestone.
+Run the snesrecomp Python v2 and shared C suites when their generator/runtime
+source changes, not for every cfg-only AOT batch. For an AOT selection change,
+use representative title replays and record which additions were exercised.
+At promotion, verify fresh cfg-only generation against the accepted output.
+An identical desktop binary hash permits reuse of its accepted gameplay checks.
+After changing patch application or generation glue, run
 `python3 tools/test-build-workflow.py` and verify fresh normal generation.
+Before handing work on, run `sh tools/check-publication-boundary.sh` and record
+the checks actually performed and any remaining coverage limits.

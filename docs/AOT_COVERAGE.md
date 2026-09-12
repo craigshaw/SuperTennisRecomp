@@ -78,14 +78,52 @@ hardware accuracy or correct generated write visibility.
 
 Retain those bounded reference checks and extend executable write/event tests
 before widening selected bodies. Global bus timing remains experimental and
-opt-in. The two accepted native leaves now use selected instruction timing in
+opt-in. Accepted native leaves use selected instruction timing in
 normal generation. Treat exact comparison with the old working build as a change detector,
 not an unconditional acceptance gate after an independently supported timing
 correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint
+## Accepted normal-build checkpoint: 190 variants
+
+The 12 September 2026 leaf batch adds seventeen exact call-entry variants to
+the previous 173-body build. They use the existing selected instruction-timing
+mode. No generator/runtime patch or dependency repin was needed. Tracked
+entry declarations are in bank00 through bank03 cfg files; the shared normal
+generation helper selects nineteen instruction-timed variants in total.
+Global bus timing remains disabled. No new exit-width contracts are asserted.
+
+Two targeted replays matched the accepted control on every recorded field
+across 6,625 frames, including CPU state, clocks, memory and pixels. Sixteen
+additions were exercised, removing 9,201 interpreter fallbacks. This measures
+coverage, not host speed. `$00:B82C M1X0` has an observed call entry in the
+original full-match profile but no coverage in the saved replay set. Retain
+that limitation when discussing the batch; manual acceptance does not prove
+that each routine ran.
+
+The maintainer tested the 190-body desktop candidate and reported correct
+gameplay with no noticeable difference. Its capture exited normally with no
+bailouts, tuple overflow or journal write failures. The session did not record
+controller input. The private cfg proposal was validated with the lab manifest
+reader and reproduced the entire accepted manifest and all seven generated C
+files byte-for-byte without a profile.
+
+Fresh normal generation reproduced that output, and the rebuilt
+`build/super_tennis` has the same SHA-256 hash as the desktop candidate the
+maintainer tested. Its accepted gameplay and replay checks were reused.
+The seven build-workflow checks passed. The shared runtime and generator
+suites were not repeated because their source was unchanged. This promotion
+was built on macOS Apple Silicon; Windows shares the generation helper but
+was not executed.
+
+Private evidence is under the directories named in
+`captures/aot-leaf-batch-current.txt` and
+`captures/aot-batch-promotion-current.txt`. This batch leaves 670 of the
+860 variants from the broad profile analysis outside the normal AOT set.
+The call-bearing candidates still need separate instruction-timing support.
+
+## Previous normal-build checkpoint: 173 variants
 
 The accepted candidate has 173 AOT variants. In addition to the small
 `$00:C7A0 M1X0` leaf, it selects `$00:C3DE M1X0`, the only leaf among the five
@@ -181,9 +219,11 @@ profile, or treat generated eligibility alone as runtime validation.
 2. Compare roots, exact AOT variants, interpreter-only variants, and rejection
    reasons. The profile supplies observed entry points and widths. The ROM
    supplies instructions; the analyser still decides eligibility.
-3. Build a separate experimental executable. Run the neutral headless check,
-   relevant deterministic title replays, and appropriate runtime tripwires
-   and event-timing diagnostics. Compiler acceptance alone is insufficient.
+3. Build a separate experimental executable. Start with a representative
+   deterministic title replay and appropriate runtime diagnostics. Reuse
+   verified unchanged controls. Add checks for uncovered entries or a concrete
+   failure; do not repeat all suites on each selection change. Compiler
+   acceptance alone is insufficient.
 4. Iterate on a bounded candidate set. For a mismatch, record the earliest
    failing frame, PC, M, and X before changing analysis or scheduling. Use
    independent bounded Mesen evidence through the lab where needed.
@@ -236,12 +276,15 @@ selection only after applying the same acceptance gate to another candidate set.
    Explicit cfg names or boundaries can change code partitioning; investigate
    differences, document any expected ones, and validate the resulting code.
    With identical effective inputs and generator, require reproducible output.
-3. Build from that freshly regenerated output and rerun the neutral check,
-   relevant title replays, and diagnostics. This checks the final cfg-driven
-   build, not just the earlier profile-driven experiment.
-4. Run the publication boundary check, Python v2 suite, and shared C suite.
-   Verify both platform scripts express the same generation policy and record
-   any platform that was not tested.
+3. Build from that freshly regenerated output. If its desktop binary hash is
+   identical to the accepted candidate, reuse the candidate's gameplay and
+   replay checks. Otherwise investigate the difference and run the relevant
+   focused checks on the final build.
+4. Run the publication boundary check. Run the Python v2 and shared C suites
+   when their generator/runtime source changed; reuse prior results for an
+   unchanged dependency. Generation-glue changes require the build-workflow
+   check. Verify both platform scripts share the generation policy and record
+   platforms and entry variants that were not exercised.
 
 The work is complete when contributors can generate the accepted code through
 the documented normal build path without private capture files, and that

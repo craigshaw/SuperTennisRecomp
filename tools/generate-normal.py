@@ -29,7 +29,14 @@ def main():
         if key.startswith("SNESRECOMP_EMIT_") or key in (
                 "SNESRECOMP_ROOT", "SNESRECOMP_EVENT_PRECISION_PROFILE"):
             del env[key]
-    env["SNESRECOMP_EMIT_INSTRUCTION_TIMING"] = "00C7A0:1:0,00C3DE:1:0"
+    env["SNESRECOMP_EMIT_INSTRUCTION_TIMING"] = ",".join((
+        "00C7A0:1:0", "00C3DE:1:0",
+        "00B5BE:1:0", "00B82C:1:0", "00B8F0:1:0", "00B92D:1:0",
+        "00BBD1:1:0", "00BD1B:1:0", "00C137:1:0", "00C3AF:1:0",
+        "00DA64:1:0", "00DC7F:1:0", "01A40E:1:0", "01B506:1:0",
+        "01D0C1:1:0", "02B15C:1:0", "02B2C5:1:0", "02B4AB:0:0",
+        "0381D8:1:0",
+    ))
     if args.event_crossing_audit:
         env["SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"] = "1"
     if args.event_precision_profile:

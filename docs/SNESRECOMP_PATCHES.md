@@ -88,11 +88,12 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 ## Normal generation policy
 
-The tracked cfg declares the observed `$00:C3DE M1X0` and `$00:C7A0 M1X0`
-entries. Both platform regeneration scripts call `tools/generate-normal.py`,
-which enables cfg roots and selects exactly these two native leaves for
-instruction timing. No profile manifest is required. Global bus timing remains
-disabled, and inherited experimental generation settings are cleared.
+The tracked cfg declares the accepted exact call entries. Both platform
+regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
+and selects nineteen native leaves for instruction timing: the original
+`$00:C3DE M1X0` and `$00:C7A0 M1X0`, plus the seventeen-entry leaf batch.
+The normal output has 190 AOT bodies. No profile manifest is required. Global
+bus timing remains disabled, and inherited experimental settings are cleared.
 
 The shared helper keeps the existing event diagnostics available through
 explicit `--event-crossing-audit` and `--event-precision-profile` options.
@@ -111,6 +112,13 @@ addressing, stack manipulation, memory RMW, RTI and block moves remain outside
 this mode. Unsupported selections fail generation.
 
 ## Evidence and limits
+
+The subsequent seventeen-entry batch uses this same pinned runtime and adds
+no patches. Two targeted replays match every recorded field across 6,625
+frames and exercise sixteen additions; `$00:B82C M1X0` remains outside saved
+replay coverage. The maintainer accepted gameplay, and cfg-only generation
+reproduces all seven candidate C files and the full manifest. See
+[AOT_COVERAGE.md](AOT_COVERAGE.md) for the current checkpoint and test policy.
 
 The 173-body candidate passed all 18,534 checked frames across five private
 replays and a neutral run against the corrected 172-body control. The added
@@ -142,7 +150,12 @@ coverage workflow and evidence distinctions.
 
 ## Required checks
 
-After dependency or generation changes, run:
+After changing generator/runtime source, run the relevant suites once at the
+integration milestone. Generation-glue changes require the workflow check;
+cfg-only batches use focused replay and reproducibility checks as described
+in [AOT_COVERAGE.md](AOT_COVERAGE.md).
+
+Available integration checks:
 
 ```sh
 python3 tools/test-build-workflow.py
@@ -151,9 +164,10 @@ bash snesrecomp/tests/run_c_tests.sh
 sh tools/check-publication-boundary.sh
 ```
 
-Regenerate and build the title, then run the neutral check and relevant private
-replays described in [`AGENTS.md`](../AGENTS.md). Final promotion must compare
-fresh normal cfg-generated output and behaviour with the accepted candidate.
+Regenerate and build the title, then apply the checks described in
+[`AGENTS.md`](../AGENTS.md). Final promotion must compare fresh normal
+cfg-generated output with the accepted candidate. An identical desktop binary
+hash permits reuse of accepted gameplay results.
 Record any platform that was not executed. Patch application tests cover clean
 setup, repeat setup, modified/partial refusal and CRLF checkout behaviour.
 
