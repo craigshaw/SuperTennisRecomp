@@ -1,0 +1,684 @@
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+new file mode 100644
+--- /dev/null
++++ b/recompiler/v2/bus_timing.py
+@@ -0,0 +1,35 @@
++"""Experimental generated bus-clock accounting, enabled at generation time.
++
++Every CPU cycle starts at six master clocks. Add only the wait-state excess
++for instruction fetches and emitted architectural data/stack accesses. Keep
++host prologue inspection reads outside this transformation.
++"""
++import os
++import re
++
++
++def enabled():
++    return bool(os.environ.get("SNESRECOMP_EMIT_BUS_TIMING"))
++
++
++class BusTimingLines(list):
++    def __init__(self):
++        super().__init__()
++        self.pc = 0
++        self.audit = int(bool(os.environ.get("SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT")))
++
++    def append(self, line):
++        line = re.sub(r"\bcpu_(read|write)(8|16)\(cpu,\s*",
++                      lambda m: f"cpu_aot_{m[1]}{m[2]}(cpu, 0x{self.pc:06X}u, {self.audit}, ",
++                      line)
++        super().append(line)
++
++    def extend(self, lines):
++        for line in lines:
++            self.append(line)
++
++    def instruction(self, insn):
++        self.pc = insn.addr & 0xFFFFFF
++        # Fetches are modelled, not executed: generated instructions contain
++        # their operands as literals. Sample MEMSEL here, not once per block.
++        self.append(f"cpu_aot_fetch_extra(cpu, 0x{self.pc:06X}u, {insn.length}, {self.audit});")
+diff --git a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+--- a/recompiler/v2/codegen.py
++++ b/recompiler/v2/codegen.py
+@@ -36,6 +36,7 @@
+ from typing import Dict, List, Optional, Tuple  # noqa: E402
+ from snes_cycles import region_speed  # noqa: E402
+ from v2.naming import variant_suffix as _variant_suffix  # noqa: E402
++from v2 import bus_timing  # noqa: E402
+ 
+ # Resolver: 24-bit address (bank << 16 | pc) -> friendly C function name.
+ # Populated by emit_bank before each bank emit (a process-wide map of every
+@@ -556,13 +557,30 @@
+ 
+ def _emit_read(op: Read) -> List[str]:
+     bank, addr = _segref_addr_expr(op.seg)
+-    return [f"{widths.ctype(op.width)} {_v(op.out)} = "
++    prefix, bank, addr = _bus_address_once(op.seg, bank, addr)
++    return prefix + [f"{widths.ctype(op.width)} {_v(op.out)} = "
+             f"{widths.read_fn(op.width)}(cpu, {bank}, {addr});"]
+ 
+ 
+ def _emit_write(op: Write) -> List[str]:
+     bank, addr = _segref_addr_expr(op.seg)
+-    return [f"{widths.write_fn(op.width)}(cpu, {bank}, {addr}, {_v(op.src)});"]
++    prefix, bank, addr = _bus_address_once(op.seg, bank, addr)
++    return prefix + [f"{widths.write_fn(op.width)}(cpu, {bank}, {addr}, {_v(op.src)});"]
++
++
++def _bus_address_once(seg, bank, addr):
++    if (bus_timing.enabled() and seg.kind == SegKind.DP_INDIRECT_LONG
++            and seg.index is not None):
++        # Both bank/offset expressions otherwise evaluate the same pointer
++        # reads. Materialise once so the pointer contributes three bus bytes.
++        ptr = f"(uint16)(cpu->D + {seg.offset:#06x})"
++        name = f"_bus_addr_{_CURRENT_SOURCE_PC24:06x}"
++        idx = "cpu->X" if seg.index == Reg.X else "cpu->Y"
++        prefix = [f"uint32 {name} = cpu_read16(cpu, 0x00, {ptr});",
++                  f"{name} |= (uint32)cpu_read8(cpu, 0x00, (uint16)({ptr} + 2)) << 16;",
++                  f"{name} += {idx};"]
++        return prefix, f"(uint8)({name} >> 16)", f"(uint16){name}"
++    return [], bank, addr
+ 
+ 
+ def _emit_readreg(op: ReadReg) -> List[str]:
+@@ -2319,6 +2337,10 @@
+         return [
+             "cpu_trace_event(cpu, 0, CPU_TR_RTI, 0, 0);",
+             "{ cpu->S = (uint16)(cpu->S + 1); cpu->P = cpu_read8(cpu, 0x00, cpu->S); cpu_p_to_mirrors(cpu);",
++            *([f"  cpu_aot_bus_extra(cpu, {_trace_pc_arg()}, "
++               f"{int(bool(os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT')))}, "
++               "0, (uint16)(cpu->S + 1), cpu->emulation ? 2 : 3);"]
++              if bus_timing.enabled() else []),
+             "  cpu->S = (uint16)(cpu->S + 2);  /* pull + discard PC */",
+             "  if (!cpu->emulation) cpu->S = (uint16)(cpu->S + 1);  /* native: pull + discard PB */",
+             "  cpu_trace_px_record(cpu, 0, 3 /*RTI*/, cpu->P, cpu->P);",
+@@ -2547,6 +2569,8 @@
+     fast_speed = region_speed(_CURRENT_SOURCE_PC24, 1)
+     speed_expr = (str(slow_speed) if slow_speed == fast_speed else
+                   f"(g_memsel ? {fast_speed} : {slow_speed})")
++    if bus_timing.enabled():
++        speed_expr = "6"
+     audit_line = (
+         f"      interp_bridge_event_audit_charge(cpu, {trace_pc}, "
+         f"7 * {speed_expr});"
+@@ -2578,6 +2602,9 @@
+         audit_line,
+         "      cpu->cycles += 7;",
+         f"      cpu->master_cycles += 7 * {speed_expr};",
++        *([f"      cpu_aot_fetch_extra(cpu, {trace_pc}, 3, "
++           f"{int(bool(os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT')))});"]
++          if bus_timing.enabled() else []),
+         "    }",
+         "  } while (cpu->A != 0xFFFF);",
+         "}",
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -40,6 +40,7 @@
+     variant_suffix as _variant_suffix,
+ )
+ from v2.event_precision import load_event_precision_sites  # noqa: E402
++from v2 import bus_timing  # noqa: E402
+ from snes_cycles import (  # noqa: E402
+     block_static_cycles, instr_runtime_charges, region_speed,
+ )
+@@ -1373,11 +1374,13 @@
+ 
+     for key in block_order:
+         block = cfg.blocks[key]
+-        lines: List[str] = []
++        lines: List[str] = bus_timing.BusTimingLines() if bus_timing.enabled() else []
+         block_terminated = False  # True if last op was branch/goto/return/call
+         # Axis-5: master-clocks-per-CPU-cycle for this block's code region, used
+         # to weight the dynamic (D.l/page-cross/branch-taken) master charges.
+         _blk_spd_expr, _blk_spd_const = _block_speed(bank, key.pc)
++        if bus_timing.enabled():
++            _blk_spd_expr, _blk_spd_const = "6", 6
+         _event_audit = bool(
+             os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'))
+ 
+@@ -1496,6 +1499,8 @@
+                   f'skip_emit_idx={sorted(skip_emit_idx)}',
+                   file=_sys.stderr, flush=True)
+         for ii, (di_insn, ir_ops) in enumerate(pairs):
++            if bus_timing.enabled():
++                lines.instruction(di_insn)
+             # NLR: inject _pending_skip setter + diagnostics RIGHT BEFORE
+             # the terminator insn. This ensures any preceding setup ops
+             # have already emitted, and the upcoming Goto/Return picks up
+@@ -2055,6 +2060,8 @@
+ 
+     # Compose the function source with labels per block.
+     src: List[str] = []
++    if bus_timing.enabled():
++        src.append('#include "snes/aot_bus_timing.h"')
+     src.append(f"RecompReturn {func_name}(CpuState *cpu) {{")
+     # Diagnostics — same call-stack plumbing v1 emitted, so the runtime
+     # debug_server's `call_stack` cmd and crash-handler attribution work.
+@@ -2198,6 +2205,8 @@
+         if _cyc_const:
+             src.append(f'    cpu->cycles += {_cyc_const};')
+             _spd_expr, _spd_const = _block_speed(bank, key.pc)
++            if bus_timing.enabled():
++                _spd_expr, _spd_const = "6", 6
+             if _spd_const is not None:
+                 if os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'):
+                     src.append(
+diff --git a/runner/src/snes/aot_bus_timing.h b/runner/src/snes/aot_bus_timing.h
+new file mode 100644
+--- /dev/null
++++ b/runner/src/snes/aot_bus_timing.h
+@@ -0,0 +1,54 @@
++#ifndef SNESRECOMP_AOT_BUS_TIMING_H
++#define SNESRECOMP_AOT_BUS_TIMING_H
++
++#include "../cpu_state.h"
++#include "interp_bridge.h"
++#include "snes_cycles.h"
++
++/* Generated blocks precharge six clocks per CPU cycle. These helpers add
++ * only bus wait states. They do not establish instruction/event precision.
++ * In particular, write callbacks still observe the block's precharge. */
++static inline void cpu_aot_extra(CpuState *cpu, uint32 pc, int audit,
++                                 unsigned clocks) {
++    if (audit && clocks) interp_bridge_event_audit_charge(cpu, pc, clocks);
++    cpu->master_cycles += clocks;
++}
++
++static inline void cpu_aot_bus_extra(CpuState *cpu, uint32 pc, int audit,
++                                     uint8 bank, uint16 addr, unsigned bytes) {
++    unsigned clocks = 0;
++    for (unsigned i = 0; i < bytes; ++i)
++        clocks += (unsigned)snes_region_speed(((uint32)bank << 16) |
++                    (uint16)(addr + i), g_memsel) - SNES_CYC_INTERNAL;
++    cpu_aot_extra(cpu, pc, audit, clocks);
++}
++
++static inline void cpu_aot_fetch_extra(CpuState *cpu, uint32 pc,
++                                       unsigned bytes, int audit) {
++    cpu_aot_bus_extra(cpu, pc, audit, (uint8)(pc >> 16), (uint16)pc, bytes);
++}
++
++static inline uint8 cpu_aot_read8(CpuState *cpu, uint32 pc, int audit,
++                                   uint8 bank, uint16 addr) {
++    cpu_aot_bus_extra(cpu, pc, audit, bank, addr, 1);
++    return cpu_read8(cpu, bank, addr);
++}
++
++static inline uint16 cpu_aot_read16(CpuState *cpu, uint32 pc, int audit,
++                                     uint8 bank, uint16 addr) {
++    cpu_aot_bus_extra(cpu, pc, audit, bank, addr, 2);
++    return cpu_read16(cpu, bank, addr);
++}
++
++static inline void cpu_aot_write8(CpuState *cpu, uint32 pc, int audit,
++                                  uint8 bank, uint16 addr, uint8 value) {
++    cpu_aot_bus_extra(cpu, pc, audit, bank, addr, 1);
++    cpu_write8(cpu, bank, addr, value);
++}
++
++static inline void cpu_aot_write16(CpuState *cpu, uint32 pc, int audit,
++                                   uint8 bank, uint16 addr, uint16 value) {
++    cpu_aot_bus_extra(cpu, pc, audit, bank, addr, 2);
++    cpu_write16(cpu, bank, addr, value);
++}
++#endif
+diff --git a/tests/run_c_tests.sh b/tests/run_c_tests.sh
+--- a/tests/run_c_tests.sh
++++ b/tests/run_c_tests.sh
+@@ -89,6 +89,9 @@
+ echo "=== generated/interpreted folded-branch CPU cycles ==="
+ python3 "$ROOT/tests/timing/test_branch_cycles.py"
+ 
++echo "=== generated/interpreted final bus clocks ==="
++python3 "$ROOT/tests/timing/test_bus_clocks.py"
++
+ echo "=== DSP-1 bus/core shell ==="
+ "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+diff --git a/tests/v2/test_emit_cycle_charge.py b/tests/v2/test_emit_cycle_charge.py
+--- a/tests/v2/test_emit_cycle_charge.py
++++ b/tests/v2/test_emit_cycle_charge.py
+@@ -6,6 +6,7 @@
+ import pathlib
+ import re
+ import tempfile
++from unittest.mock import patch
+ 
+ from _helpers import make_lorom_bank0  # noqa: E402
+ from v2.emit_function import emit_function  # noqa: E402
+@@ -113,6 +114,27 @@
+             os.environ.pop(name, None)
+         else:
+             os.environ[name] = previous
++
++
++def test_bus_timing_separates_base_fetch_and_data_charges():
++    rom = make_lorom_bank0({0x8000: bytes([0xA9, 0, 0x8D, 0, 0x42, 0x6B])})
++    with patch.dict(os.environ, {'SNESRECOMP_EMIT_BUS_TIMING': '1',
++                                'SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT': '1'}):
++        src = emit_function(rom, bank=0, start=0x8000, entry_m=1, entry_x=0)
++    assert 'cpu->master_cycles += 72;' in src  # 12 CPU cycles at six clocks.
++    assert 'cpu_aot_fetch_extra(cpu, 0x008000u, 2, 1);' in src
++    assert 'cpu_aot_fetch_extra(cpu, 0x008002u, 3, 1);' in src
++    assert 'cpu_aot_write8(cpu, 0x008002u, 1,' in src
++    # Host return-frame inspection is not a guest bus transfer.
++    prologue = src[:src.index('  L_8000_M1X0:')]
++    assert 'cpu_read8(cpu,' in prologue
++    assert 'cpu_aot_read8(cpu,' not in prologue
++
++
++def test_indexed_rmw_has_no_dynamic_page_cross_charge():
++    rom = make_lorom_bank0({0x8000: bytes([0xFE, 0xFF, 0x10, 0x6B])})
++    src = emit_function(rom, bank=0, start=0x8000, entry_m=1, entry_x=0)
++    assert 'page-cross' not in src
+ 
+ 
+ def test_every_block_with_insns_is_charged():
+diff --git a/tests/v2/test_program_emit.py b/tests/v2/test_program_emit.py
+--- a/tests/v2/test_program_emit.py
++++ b/tests/v2/test_program_emit.py
+@@ -37,6 +37,28 @@
+         "--rom", str(rom_path), "--cfg-dir", str(cfg_dir),
+         "--out-dir", str(out_dir), "--no-host-root-scan",
+     ], text=True, capture_output=True)
++
++
++def test_bus_timing_option_invalidates_generation_cache(tmp_path, monkeypatch):
++    rom_path, cfg_dir, out_dir = _fixture(tmp_path, target_opcode=0xEA)
++    monkeypatch.delenv('SNESRECOMP_EMIT_BUS_TIMING', raising=False)
++    first = _run(rom_path, cfg_dir, out_dir)
++    assert first.returncode == 0, first.stdout + first.stderr
++    bank_path = out_dir / 'bank00_v2.c'
++    legacy = bank_path.read_bytes()
++    assert b'aot_bus_timing.h' not in legacy
++    monkeypatch.setenv('SNESRECOMP_EMIT_BUS_TIMING', '1')
++    enabled = _run(rom_path, cfg_dir, out_dir)
++    assert enabled.returncode == 0, enabled.stdout + enabled.stderr
++    assert b'aot_bus_timing.h' in bank_path.read_bytes()
++    assert 'reused verified published output' not in enabled.stdout
++    repeated = _run(rom_path, cfg_dir, out_dir)
++    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
++    assert 'reused verified published output' in repeated.stdout
++    monkeypatch.delenv('SNESRECOMP_EMIT_BUS_TIMING')
++    restored = _run(rom_path, cfg_dir, out_dir)
++    assert restored.returncode == 0, restored.stdout + restored.stderr
++    assert bank_path.read_bytes() == legacy
+ 
+ 
+ def test_manifest_emitter_keeps_structural_target_as_lle(tmp_path):
+diff --git a/tools/v2_emit.py b/tools/v2_emit.py
+--- a/tools/v2_emit.py
++++ b/tools/v2_emit.py
+@@ -250,6 +250,8 @@
+             )
+         tree_digest = _tree_digest((
+             REPO / "recompiler" / "v2", pathlib.Path(__file__).resolve(),
++            REPO / "recompiler" / "snes_cycles.py",
++            REPO / "recompiler" / "snes65816.py",
+             REPO / "tools" / "v2_analyze.py", *native_inputs))
+         # These environment switches change emitted AOT bodies, so they must
+         # participate in the published-output cache key. Treat any non-empty
+@@ -258,9 +260,11 @@
+         event_audit = bool(os.environ.get(
+             "SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"))
+         event_precision = event_precision_profile_digest()
++        bus_timing = bool(os.environ.get("SNESRECOMP_EMIT_BUS_TIMING"))
+         return hashlib.sha256(
+             (f"{tree_digest}\0aot_deny_gate={int(deny_gate)}"
+              f"\0event_crossing_audit={int(event_audit)}"
++             f"\0bus_timing={int(bus_timing)}"
+              f"\0event_precision={event_precision}").encode()
+         ).hexdigest()
+ 
+diff --git a/tests/timing/fixture.c b/tests/timing/fixture.c
+--- a/tests/timing/fixture.c
++++ b/tests/timing/fixture.c
+@@ -57,22 +57,35 @@
+     g_c.x_flag = test->xf;
+     g_c.DB = test->db;
+     g_c.X = test->x;
++    g_c.Y = test->y;
++    g_c.D = test->d;
+     g_memsel = test->memsel;
+     g_c.PB = (uint8)(test->pc >> 16);
+     cpu_mirrors_to_p(&g_c);
+     load(test->pc, test->code, test->size);
++    for (unsigned i = 0; i < test->init_count; ++i)
++        RAM[test->init[i].address] = test->init[i].value;
+     /* A real RTL frame for a return to $00:9000, outside every fake entry. */
+     g_c.S = 0x01FC;
+     RAM[0x01FD] = 0xFF;
+     RAM[0x01FE] = 0x8F;
+     RAM[0x01FF] = 0;
+     g_c.host_return_valid = 3;
++    int interrupt = test->code[test->size - 1] == 0x40;
++    if (interrupt) {
++        g_c.S = 0x01FB;
++        RAM[0x01FC] = g_c.P;
++        RAM[0x01FD] = 0;
++        RAM[0x01FE] = 0x90;
++        g_c.host_return_valid = 0;
++    }
+     recording = 1;
+     int ok;
+     if (!strcmp(argv[2], "aot"))
+         ok = test->body(&g_c) == RECOMP_RETURN_NORMAL;
+     else if (!strcmp(argv[2], "interp"))
+-        ok = interp_bridge_run(&g_c, test->pc) == 1;
++        ok = (interrupt ? interp_bridge_run_interrupt(&g_c, test->pc)
++                        : interp_bridge_run(&g_c, test->pc)) == 1;
+     else return 2;
+     recording = 0;
+     cpu_mirrors_to_p(&g_c);
+diff --git a/tests/timing/run.py b/tests/timing/run.py
+--- a/tests/timing/run.py
++++ b/tests/timing/run.py
+@@ -66,6 +66,15 @@
+         code = bytes(case["code"])
+         rom = bytearray(0x8000)
+         rom[pc & 0x7FFF:(pc & 0x7FFF) + len(code)] = code
++        for address, value in case.get("memory", {}).items():
++            if address & 0xFFFF >= 0x8000:
++                rom[address & 0x7FFF] = value
++        for target in case.get("callees", []):
++            for m in (0, 1):
++                for xf in (0, 1):
++                    bodies.append(emit_function(bytes(rom), bank=target >> 16,
++                                                start=target & 0xFFFF,
++                                                entry_m=m, entry_x=xf))
+         name = f"timing_case_{i}_M{case.get('m', 1)}X{case.get('xf', 0)}"
+         bodies.append(emit_function(bytes(rom), bank=pc >> 16,
+                                     start=pc & 0xFFFF,
+@@ -73,12 +82,19 @@
+                                     func_name=f"timing_case_{i}"))
+         bodies.append(f"static const uint8_t code_{i}[] = {{" +
+                       ",".join(str(x) for x in code) + "};")
++        memory = case.get("memory", {})
++        bodies.append(f"static const TimingInit init_{i}[] = {{" +
++                      (",".join(f"{{{addr},{value}}}" for addr, value in memory.items())
++                       or "{0,0}") + "};")
+         table.append(f"{{code_{i}, sizeof(code_{i}), {pc}, "
+                      f"{case.get('m', 1)}, {case.get('xf', 0)}, {case.get('db', 0)}, "
+-                     f"{case.get('x', 0)}, {case.get('memsel', 0)}, {name}" + "}")
+-    header = """typedef struct TimingCase {
++                     f"{case.get('x', 0)}, {case.get('y', 0)}, {case.get('d', 0)}, "
++                     f"{case.get('memsel', 0)}, init_{i}, {len(memory)}, {name}" + "}")
++    header = """typedef struct TimingInit { uint32 address; uint8 value; } TimingInit;
++typedef struct TimingCase {
+     const uint8_t *code; int size; uint32 pc;
+-    uint8 m, xf, db; uint16 x; uint8 memsel;
++    uint8 m, xf, db; uint16 x, y, d; uint8 memsel;
++    const TimingInit *init; unsigned init_count;
+     RecompReturn (*body)(CpuState *);
+ } TimingCase;
+ """
+@@ -152,6 +168,8 @@
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--out-dir", type=Path)
+     parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
++    parser.add_argument("--bus-timing", action="store_true",
++                        help="enable experimental generated bus-clock accounting")
+     args = parser.parse_args()
+     try:
+         # Prevent diagnostic environment settings from changing the tested code
+@@ -159,6 +177,8 @@
+         for key in tuple(os.environ):
+             if key.startswith("SNESRECOMP_"):
+                 os.environ.pop(key)
++        if args.bus_timing:
++            os.environ["SNESRECOMP_EMIT_BUS_TIMING"] = "1"
+         if args.out_dir:
+             out = args.out_dir.resolve()
+             out.mkdir(parents=True, exist_ok=False)
+diff --git a/tests/timing/test_bus_clocks.py b/tests/timing/test_bus_clocks.py
+new file mode 100644
+--- /dev/null
++++ b/tests/timing/test_bus_clocks.py
+@@ -0,0 +1,186 @@
++"""Executable final-clock checks. Write/event timestamp parity is separate."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++
++import run as timing
++from test_branch_cycles import branch_cases
++
++
++def memory_cases():
++    # mode, LDA, STA, read base, store base, operand length, pointer bytes.
++    modes = [
++        ("dp", 0xA5, 0x85, 3, 3, 1, 0),
++        ("dpx", 0xB5, 0x95, 4, 4, 1, 0),
++        ("abs", 0xAD, 0x8D, 4, 4, 2, 0),
++        ("absx", 0xBD, 0x9D, 4, 5, 2, 0),
++        ("absy", 0xB9, 0x99, 4, 5, 2, 0),
++        ("long", 0xAF, 0x8F, 5, 5, 3, 0),
++        ("longx", 0xBF, 0x9F, 5, 5, 3, 0),
++        ("dpi", 0xB2, 0x92, 5, 5, 1, 2),
++        ("dpix", 0xA1, 0x81, 6, 6, 1, 2),
++        ("dpiy", 0xB1, 0x91, 5, 6, 1, 2),
++        ("dpl", 0xA7, 0x87, 6, 6, 1, 3),
++        ("dply", 0xB7, 0x97, 6, 6, 1, 3),
++        ("sriy", 0xB3, 0x93, 7, 7, 1, 2),
++    ]
++    cases = []
++    for mode, read, write, rc, wc, operands, ptrbytes in modes:
++        for store in (False, True):
++            for m in (0, 1):
++                for target, speed in ((0x1020, 8), (0x4220, 6), (0x4020, 12)):
++                    width = 2 - m
++                    case = dict(name=f"{mode}-{'store' if store else 'read'}-M{m}-{target:04X}",
++                                m=m, x=1, y=1)
++                    if ptrbytes:
++                        operand = 0x40 if mode != 'sriy' else 8
++                        pointer = (0x1FC + operand) if mode == 'sriy' else operand + (mode == 'dpix')
++                        base = target - (mode in ('dpiy', 'dply', 'sriy'))
++                        case['memory'] = {pointer + i: (base >> (8*i)) & 255 for i in range(ptrbytes)}
++                    elif mode.startswith('dp'):
++                        operand = 0x20 - (mode == 'dpx')
++                        case['d'] = target & 0xFF00
++                    else:
++                        operand = target - (mode in ('absx', 'absy', 'longx'))
++                    case['code'] = [write if store else read] + [
++                        (operand >> (8*i)) & 255 for i in range(operands)] + [0x6B]
++                    cpu = (wc if store else rc) + (1-m)
++                    bus = 1 + operands + ptrbytes + width
++                    case['cpu'] = cpu + 6
++                    case['master'] = (1+operands)*8 + ptrbytes*8 + width*speed + (cpu-bus)*6 + 44
++                    cases.append(case)
++    return cases
++
++
++def indexed_write_cases():
++    cases = []
++    # The indexed internal cycle is already in these base costs. Index width
++    # and page crossing must not add it again. WDC W65C816S datasheet,
++    # Tables 3-1 and 5-4; native mode, with accumulator width applied below.
++    for op, base, rmw in ((0x9D, 5, False), (0x99, 5, False),
++                          (0x9E, 5, False), (0x91, 6, False),
++                          *((op, 7, True) for op in (0x1E, 0x3E, 0x5E, 0x7E, 0xDE, 0xFE))):
++        for m in (0, 1):
++            for xf in (0, 1):
++                for cross in (False, True):
++                    addr = 0x10FF if cross else 0x1020
++                    case = dict(name=f"indexed-{op:02X}-M{m}X{xf}-cross{int(cross)}",
++                                m=m, xf=xf, x=1, y=1)
++                    if op == 0x91:
++                        case['code'] = [op, 0x40, 0x6B]
++                        case['memory'] = {0x40: addr & 255, 0x41: addr >> 8}
++                        fetch, ptr = 2, 2
++                    else:
++                        case['code'] = [op, addr & 255, addr >> 8, 0x6B]
++                        fetch, ptr = 3, 0
++                    cpu = base + (2 if rmw else 1)*(1-m)
++                    data = (2-m)*(2 if rmw else 1)
++                    case['cpu'] = cpu + 6
++                    case['master'] = (fetch+ptr+data)*8 + (cpu-fetch-ptr-data)*6 + 44
++                    cases.append(case)
++    return cases
++
++
++def stack_and_move_cases():
++    cases = [
++        dict(name='pha-pla-8', code=[0x48, 0x68, 0x6B], cpu=13, master=94),
++        dict(name='pha-pla-16', code=[0x48, 0x68, 0x6B], m=0, cpu=15, master=110),
++        dict(name='phx-plx-8', code=[0xDA, 0xFA, 0x6B], xf=1, cpu=13, master=94),
++        dict(name='phx-plx-16', code=[0xDA, 0xFA, 0x6B], cpu=15, master=110),
++        dict(name='phy-ply-16', code=[0x5A, 0x7A, 0x6B], cpu=15, master=110),
++        dict(name='php-plp', code=[0x08, 0x28, 0x6B], cpu=13, master=94),
++        dict(name='phb-plb', code=[0x8B, 0xAB, 0x6B], cpu=13, master=94),
++        dict(name='phd-pld', code=[0x0B, 0x2B, 0x6B], cpu=15, master=110),
++        dict(name='pea-pla', code=[0xF4, 0x34, 0x12, 0x68, 0x6B], m=0, cpu=16, master=120),
++        dict(name='per-pla', code=[0x62, 0x34, 0x12, 0x68, 0x6B], m=0, cpu=17, master=126),
++        dict(name='pei-pla', code=[0xD4, 0x40, 0x68, 0x6B], m=0, cpu=17, master=128),
++        dict(name='stack-relative-8', code=[0xA3, 8, 0x6B], cpu=10, master=74),
++        dict(name='stack-relative-16', code=[0xA3, 8, 0x6B], m=0, cpu=11, master=82),
++        dict(name='rti', code=[0x40], cpu=7, master=52),
++        dict(name='jsl-nop-rtl', code=[0x22, 0x10, 0x80, 0, 0x6B],
++             memory={0x8010:0xEA, 0x8011:0x6B}, callees=[0x8010], cpu=22, master=164),
++        dict(name='jsr-nop-rts', code=[0x20, 0x20, 0x80, 0x6B],
++             memory={0x8020:0xEA, 0x8021:0x60}, callees=[0x8020], cpu=20, master=146),
++    ]
++    for op in (0x54, 0x44):
++        for count in (1, 3):
++            cases.append(dict(name=f'move-{op:02X}-{count}', m=0,
++                              code=[0xA9, count-1, 0, op, 0x7E, 0x40, 0x6B],
++                              cpu=9+count*7, master=68+count*52))
++    return cases
++
++
++def boundary_cases():
++    cases = []
++    for addr, clocks in ((0x1FFF, 14), (0x3FFF, 18), (0x41FF, 18), (0x5FFF, 14)):
++        for op in (0xAD, 0x8D):
++            cases.append(dict(name=f'word-boundary-{op:02X}-{addr:04X}', m=0,
++                              code=[op, addr & 255, addr >> 8, 0x6B],
++                              cpu=11, master=24+clocks+44))
++    for m in (0, 1):
++        cases.append(dict(name=f'dp-low-penalty-M{m}', m=m, d=1,
++                          code=[0xA5, 0x40, 0x6B], cpu=11-m, master=82-m*8))
++    return cases
++
++
++class BusClocks(unittest.TestCase):
++    def test_final_clocks_and_architecture(self):
++        cases = (timing.CASES + memory_cases() + indexed_write_cases()
++                 + stack_and_move_cases() + boundary_cases())
++        # Native conditional branch cycles beyond the instruction bytes are
++        # internal. RTL reads its low-WRAM stack at eight clocks in both ROM modes.
++        for case in branch_cases():
++            # Derive executed fetch count from CPU total instead: load is
++            # entirely fetches, branch has two fetches and possibly one
++            # internal cycle, NOP/RTL contribute 1 and 2 internal cycles.
++            branch_index = 2 if (case['m'] if case['code'][0] == 0xA9 else case['xf']) else 3
++            value = int.from_bytes(bytes(case['code'][1:branch_index]), 'little')
++            taken = (value != 0) if case['code'][branch_index] == 0xD0 else (value == 0)
++            nop = case['code'][branch_index+1] == 1 and not taken
++            fetch = branch_index + 2 + int(nop) + 1
++            case['master'] = fetch*(6 if case['memsel'] else 8) + 3*8 + (int(taken)+int(nop)+2)*6
++            cases.append(case)
++        old = os.environ.get('SNESRECOMP_EMIT_BUS_TIMING')
++        os.environ['SNESRECOMP_EMIT_BUS_TIMING'] = '1'
++        try:
++            with tempfile.TemporaryDirectory(prefix='snesrecomp-bus-clocks-') as tmp:
++                out = Path(tmp)
++                binary = timing.build(out, os.environ.get('CC', 'cc'), cases)
++                write_order_differences = []
++                for index, case in enumerate(cases):
++                    with self.subTest(case=case['name']):
++                        states = []
++                        for tier in ('interp', 'aot'):
++                            result = subprocess.run([str(binary), str(index), tier], cwd=out,
++                                                    text=True, capture_output=True, timeout=10)
++                            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
++                            state = json.loads(result.stdout)
++                            self.assertEqual(state['cpu_cycles'], case['cpu'], (tier, state))
++                            self.assertEqual(state['master_cycles'], case['master'], (tier, state))
++                            for write in state['writes']:
++                                write.pop('master')  # Explicitly outside this test's scope.
++                            states.append(state)
++                        if states[0]['writes'] != states[1]['writes']:
++                            write_order_differences.append(case['name'])
++                        # Final memory is in scope here. Preserve the separate
++                        # write-order finding for the later write/event work.
++                        for state in states:
++                            state['writes'] = {w['address']: w['value'] for w in state['writes']}
++                        self.assertEqual(*states)
++                print(f"Final clocks/state checked in {len(cases)} cases; "
++                      f"write order differs in {len(write_order_differences)} cases.")
++        finally:
++            if old is None:
++                os.environ.pop('SNESRECOMP_EMIT_BUS_TIMING', None)
++            else:
++                os.environ['SNESRECOMP_EMIT_BUS_TIMING'] = old
++
++
++if __name__ == '__main__':
++    for key in tuple(os.environ):
++        if key.startswith('SNESRECOMP_'):
++            os.environ.pop(key)
++    unittest.main()
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -78,7 +78,54 @@
+ which therefore requires Python 3 as well as a C compiler. Passing this
+ focused test does not imply that the full timing differential passes.
+ 
+-## Scope
++## Experimental bus-clock accounting
++
++After the indexed-cycle and bus-clock patches, run:
++
++```sh
++python3 tests/timing/run.py --bus-timing --out-dir build/timing-bus-check
++python3 tests/timing/test_bus_clocks.py
++```
++
++The first command still returns 1: all 14 CPU/master totals agree, but five
++write-timestamp comparisons fail. The second checks final clocks, registers,
++and final written bytes in 376 cases and returns 0. It reports 31 differing
++byte-write sequences separately. Final memory agreement does not establish
++equivalent MMIO side effects, byte-write order, or write timestamps.
++
++Coverage includes direct/absolute/long/indirect reads and writes, 8/16-bit
++operand widths, indexed writes and read-modify-write, word accesses across
++speed-region boundaries, a nonzero direct-page low byte, stack operations,
++ordinary JSR/JSL calls and RTS/RTL/RTI returns, and multi-byte MVN/MVP.
++The fixture supports ordinary paired calls. It does not model arbitrary
++manual return-frame manipulation or validate all optimised call/dispatch
++trampolines and omitted stack operations.
++
++For actual generation, `SNESRECOMP_EMIT_BUS_TIMING=1` enables the experimental
++path. The option participates in the generation-cache key, together with the
++shared instruction/cycle model sources. With the option absent, generated
++code retains block costs at code-region speed. The indexed-write cycle
++corrections apply independently of this option in the generator/interpreter.
++
++Enabled generation precharges six master clocks for each CPU cycle and adds
++the excess cost for each instruction fetch and emitted data/stack access.
++Host return-frame inspection reads remain uncharged. Indexed long-indirect
++pointer reads are evaluated once, and RTI's discarded return bytes still
++contribute their access costs. Runtime-only internal cycles cost six clocks.
++MEMSEL is sampled at each fetch/access; no extra guest memory reads are made
++solely to calculate timing.
++
++This is an accounting experiment. Blocks still precharge their base cost,
++and no new per-instruction event/yield policy is introduced. Keep it out of
++normal title generation until the title comparisons pass. Correct totals in
++these synthetic cases are not a claim of complete hardware bus accuracy.
++
++The indexed write/RMW correction follows the fixed indexed-write base costs
++in the [WDC W65C816S datasheet](https://www.westerndesigncenter.com/wdc/documentation/w65c816s.pdf),
++Tables 3-1 and 5-4. The old interpreter added another conditional cycle to
++these writes; the generator also incorrectly added page-cross cycles to RMW.
++
++## Scope and remaining timing work
+ 
+ The fixture reuses the bridge suite's flat bus and disabled peripheral/event
+ scheduling. It does not validate DMA, refresh, raster deadlines, interrupts,

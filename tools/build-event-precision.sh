@@ -15,7 +15,6 @@ if [ ! -f "$REPORT" ]; then
 fi
 
 printf 'Generating from event precision profile: %s\n' "$REPORT"
-SNESRECOMP_EVENT_PRECISION_PROFILE="$REPORT" \
-  sh "$ROOT/tools/regenerate.sh" "$ROM"
+python3 "$ROOT/tools/generate-normal.py" "$ROM" --event-precision-profile "$REPORT"
 sh "$ROOT/build.sh"
 printf '%s\n' 'Event precision build ready. A normal regeneration removes it.'

@@ -1,0 +1,358 @@
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+new file mode 100644
+--- /dev/null
++++ b/tests/timing/README.md
+@@ -0,0 +1,77 @@
++# Generated/interpreted timing differential
++
++Run from the snesrecomp root with Python 3 and a POSIX C compiler:
++
++```sh
++python3 tests/timing/run.py --out-dir build/timing-check
++```
++
++The output directory must be new. Omit `--out-dir` to use a temporary directory
++that is removed at exit. `--cc clang` or `CC` selects the compiler. Windows
++MSVC command-line support has not been implemented or tested.
++
++The runner emits real C from synthetic 65816 bytes, compiles it with the real
++interpreter bridge, and runs each case in each tier in a separate process.
++It checks CPU registers, flags, stack restoration, and write addresses/values.
++It separately compares CPU cycle totals, master clocks, and the clock reported
++at each write callback. It saves generated fixture code, the compiler command,
++build and execution logs, and `results.json`. No game ROM or profile is needed.
++
++Exit codes:
++
++- `0`: all checks, including timing parity, pass.
++- `1`: state and interpreter-budget checks pass, but timing differs.
++- `2`: a tool, fixture, interpreter-budget or architectural check fails.
++
++This is a diagnostic suite with known timing failures at integration revision
++`3678d0a6d7036217f26e32f6b9087d2933783690`. It is separate from the existing
++passing Python and C suites. Do not treat a successful compile or a matching
++register result as a timing pass.
++
++## Independently calculated budgets
++
++Each case runs in native mode with X=16-bit. M is 8-bit except for `lda16_rtl`.
++Low WRAM transfers cost eight master clocks, MMIO transfers cost six, internal
++cycles cost six, and instruction fetches cost eight in SlowROM or six in
++enabled FastROM. These budgets check the bridge's accounting model. They are
++not an independent hardware measurement.
++
++SlowROM RTL has four bus reads (opcode and three stack bytes) and two internal
++cycles, giving `4*8 + 2*6 = 44` master clocks. FastROM RTL fetches its opcode
++in six clocks but still reads the low-WRAM stack at eight clocks, giving 42.
++For example, `LDA #0; STA $4200; RTL` costs `16 + 30 + 44 = 90` master clocks.
++The current emitter charges its 12 CPU cycles at eight clocks each, giving 96.
++
++| Case | CPU cycles | Interpreter master clocks |
++| --- | ---: | ---: |
++| NOP; RTL | 8 | 58 |
++| LDA immediate 8-bit; RTL | 8 | 60 |
++| LDA immediate 16-bit; RTL | 9 | 68 |
++| LDA immediate; WRAM store; RTL | 12 | 92 |
++| LDA immediate; MMIO store; RTL | 12 | 90 |
++| NOP; LDA immediate; MMIO store; RTL | 14 | 104 |
++| FastROM LDA immediate; RTL | 8 | 54 |
++| FastROM LDA immediate; WRAM store; RTL | 12 | 80 |
++| FastROM LDA immediate; MMIO store; RTL | 12 | 78 |
++| Folded taken branch | 11 | 82 |
++| Folded untaken branch with NOP fall-through | 12 | 90 |
++| Memory load; dynamic taken branch | 13 | 98 |
++| Memory load; dynamic untaken branch with NOP fall-through | 14 | 106 |
++| Indexed WRAM read across page boundary; RTL | 11 | 82 |
++
++The branch cases distinguish constant-Z folding from a runtime condition.
++The folded taken branch currently loses its extra CPU cycle: AOT reports 10,
++while the interpreter reports 11. The dynamic taken branch retains it.
++
++## Scope
++
++The fixture reuses the bridge suite's flat bus and disabled peripheral/event
++scheduling. It does not validate DMA, refresh, raster deadlines, interrupts,
++APU scheduling, or full-game behaviour. Write clocks are values visible in the
++callback, not measured hardware bus edges: the bridge charges after executing
++an instruction, while generated code charges before executing a whole block.
++
++These tests isolate three concerns: bus versus internal-cycle costs,
++instruction versus block write timing, and preservation of branch timing
++through optimisation. After a fix, retain these tests and rerun title-level
++frame/state comparisons before accepting additional AOT roots.
+diff --git a/tests/timing/fixture.c b/tests/timing/fixture.c
+new file mode 100644
+--- /dev/null
++++ b/tests/timing/fixture.c
+@@ -0,0 +1,93 @@
++/* ROM-free timing differential. The shared bridge fixture supplies a flat
++ * bus, dispatch stubs, and disabled peripheral scheduling. Generated bodies
++ * are real emitter output, not hand-written substitutes. */
++#define main bridge_contract_main
++#define cpu_write8 bridge_fixture_write8
++#define cpu_write16 bridge_fixture_write16
++#include "../interp816/bridge_test.c"
++#undef main
++#undef cpu_write8
++#undef cpu_write16
++#include "cpu_trace.h"
++
++typedef struct TimingWrite {
++    uint32 address;
++    uint8 value;
++    uint64_t master;
++} TimingWrite;
++static TimingWrite writes[32];
++static unsigned write_count;
++static int recording;
++
++void cpu_write8(CpuState *cpu, uint8 bank, uint16 address, uint8 value) {
++    if (recording) {
++        if (write_count >= 32) { fputs("write buffer overflow\n", stderr); exit(2); }
++        writes[write_count++] = (TimingWrite){
++            ((uint32)bank << 16) | address, value, cpu->master_cycles};
++    }
++    bridge_fixture_write8(cpu, bank, address, value);
++}
++void cpu_write16(CpuState *cpu, uint8 bank, uint16 address, uint16 value) {
++    cpu_write8(cpu, bank, address, (uint8)value);
++    cpu_write8(cpu, bank, (uint16)(address + 1), (uint8)(value >> 8));
++}
++void cpu_dbg_funcname(const char *name) { (void)name; }
++void WatchdogCheck(void) {}
++int cpu_resolve_ancestor_skip(uint16 stack) { (void)stack; return -1; }
++RecompReturn cpu_dispatch_pc_from(CpuState *cpu, uint32 pc, uint16 stack,
++                                  uint32 source) {
++    (void)cpu; (void)stack;
++    fprintf(stderr, "unexpected dispatch %06X from %06X\n", pc, source);
++    exit(2);
++}
++
++/* Case table and actual generated functions are supplied by run.py. */
++#include "timing_cases.inc"
++
++int main(int argc, char **argv) {
++    if (argc != 3) return 2;
++    unsigned index = (unsigned)strtoul(argv[1], NULL, 10);
++    if (index >= sizeof(cases) / sizeof(cases[0])) return 2;
++    const TimingCase *test = &cases[index];
++    RAM = calloc(1, MEMSZ);
++    if (!RAM) return 2;
++    init_cpu();
++    g_c.emulation = 0;
++    g_c.m_flag = test->m;
++    g_c.x_flag = 0;
++    g_c.DB = test->db;
++    g_c.X = test->x;
++    g_memsel = test->memsel;
++    g_c.PB = (uint8)(test->pc >> 16);
++    cpu_mirrors_to_p(&g_c);
++    load(test->pc, test->code, test->size);
++    /* A real RTL frame for a return to $00:9000, outside every fake entry. */
++    g_c.S = 0x01FC;
++    RAM[0x01FD] = 0xFF;
++    RAM[0x01FE] = 0x8F;
++    RAM[0x01FF] = 0;
++    g_c.host_return_valid = 3;
++    recording = 1;
++    int ok;
++    if (!strcmp(argv[2], "aot"))
++        ok = test->body(&g_c) == RECOMP_RETURN_NORMAL;
++    else if (!strcmp(argv[2], "interp"))
++        ok = interp_bridge_run(&g_c, test->pc) == 1;
++    else return 2;
++    recording = 0;
++    cpu_mirrors_to_p(&g_c);
++    printf("{\"ok\":%d,\"a\":%u,\"x\":%u,\"y\":%u,\"s\":%u,"
++           "\"p\":%u,\"d\":%u,\"db\":%u,\"m\":%u,\"xf\":%u,"
++           "\"cpu_cycles\":%llu,\"master_cycles\":%llu,\"writes\":[",
++           ok, g_c.A, g_c.X, g_c.Y, g_c.S, g_c.P, g_c.D, g_c.DB,
++           g_c.m_flag, g_c.x_flag,
++           (unsigned long long)g_c.cycles,
++           (unsigned long long)g_c.master_cycles);
++    for (unsigned i = 0; i < write_count; ++i)
++        printf("%s{\"address\":%u,\"value\":%u,\"master\":%llu}",
++               i ? "," : "", writes[i].address, writes[i].value,
++               (unsigned long long)writes[i].master);
++    puts("]}");
++    free(RAM);
++    return ok ? 0 : 2;
++}
+diff --git a/tests/timing/run.py b/tests/timing/run.py
+new file mode 100644
+--- /dev/null
++++ b/tests/timing/run.py
+@@ -0,0 +1,173 @@
++#!/usr/bin/env python3
++"""Compile and compare real generated C with the real interpreter bridge.
++
++Exit status: 0 for timing parity, 1 for a timing mismatch, 2 for a
++broken harness/tool, interpreter-budget mismatch or architectural mismatch.
++All programs are synthetic; no game ROM or private profile is used.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++from pathlib import Path
++import shlex
++import subprocess
++import sys
++import tempfile
++
++REPO = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(REPO / "recompiler"))
++from v2.emit_function import emit_function
++
++# Expected interpreter totals are hand-derived bus/internal-cycle budgets.
++# RTL has four bus reads (opcode and three stack bytes) and two internal
++# cycles: 4*8 + 2*6 = 44 in SlowROM with the stack in low WRAM.
++CASES = [
++    dict(name="nop_rtl", code=[0xEA, 0x6B], cpu=8, master=58),
++    dict(name="lda8_rtl", code=[0xA9, 0x5A, 0x6B], cpu=8, master=60),
++    dict(name="lda16_rtl", code=[0xA9, 0x34, 0x12, 0x6B], m=0,
++         cpu=9, master=68),
++    dict(name="wram_store", code=[0xA9, 0x5A, 0x8D, 0x00, 0x10, 0x6B],
++         cpu=12, master=92, write=16),
++    dict(name="mmio_store", code=[0xA9, 0x00, 0x8D, 0x00, 0x42, 0x6B],
++         cpu=12, master=90, write=16),
++    dict(name="internal_before_mmio", code=[0xEA, 0xA9, 0x00, 0x8D, 0x00, 0x42, 0x6B],
++         cpu=14, master=104, write=30),
++    # FastROM changes instruction fetches to six clocks, but low-WRAM stack
++    # and data accesses still cost eight. This can reverse the timing error.
++    dict(name="fastrom_lda8_rtl", code=[0xA9, 0x5A, 0x6B],
++         pc=0x808000, memsel=1, cpu=8, master=54),
++    dict(name="fastrom_wram_store", code=[0xA9, 0x5A, 0x8D, 0x00, 0x10, 0x6B],
++         pc=0x808000, memsel=1, cpu=12, master=80, write=12),
++    dict(name="fastrom_mmio_store", code=[0xA9, 0x00, 0x8D, 0x00, 0x42, 0x6B],
++         pc=0x808000, memsel=1, cpu=12, master=78, write=12),
++    dict(name="taken_branch", code=[0xA9, 0x01, 0xD0, 0x01, 0xEA, 0x6B],
++         cpu=11, master=82),
++    dict(name="untaken_branch", code=[0xA9, 0x00, 0xD0, 0x01, 0xEA, 0x6B],
++         cpu=12, master=90),
++    # Memory loads prevent the constant-Z pass from folding these branches.
++    dict(name="dynamic_taken_branch", code=[0xAD, 0x00, 0x10, 0xF0, 0x01, 0xEA, 0x6B],
++         cpu=13, master=98),
++    dict(name="dynamic_untaken_branch", code=[0xAD, 0x00, 0x10, 0xD0, 0x01, 0xEA, 0x6B],
++         cpu=14, master=106),
++    dict(name="indexed_page_cross", code=[0xBD, 0xFF, 0x10, 0x6B],
++         x=1, cpu=11, master=82),
++]
++
++
++def build(out: Path, cc: str) -> Path:
++    bodies = []
++    table = []
++    for i, case in enumerate(CASES):
++        pc = case.get("pc", 0x008000)
++        code = bytes(case["code"])
++        rom = bytearray(0x8000)
++        rom[pc & 0x7FFF:(pc & 0x7FFF) + len(code)] = code
++        name = f"timing_case_{i}_M{case.get('m', 1)}X0"
++        bodies.append(emit_function(bytes(rom), bank=pc >> 16,
++                                    start=pc & 0xFFFF,
++                                    entry_m=case.get("m", 1), entry_x=0,
++                                    func_name=f"timing_case_{i}"))
++        bodies.append(f"static const uint8_t code_{i}[] = {{" +
++                      ",".join(str(x) for x in code) + "};")
++        table.append(f"{{code_{i}, sizeof(code_{i}), {pc}, "
++                     f"{case.get('m', 1)}, {case.get('db', 0)}, "
++                     f"{case.get('x', 0)}, {case.get('memsel', 0)}, {name}" + "}")
++    header = """typedef struct TimingCase {
++    const uint8_t *code; int size; uint32 pc;
++    uint8 m, db; uint16 x; uint8 memsel;
++    RecompReturn (*body)(CpuState *);
++} TimingCase;
++"""
++    (out / "timing_cases.inc").write_text(
++        header + "\n".join(bodies) + "\nstatic const TimingCase cases[] = {\n" +
++        ",\n".join(table) + "\n};\n")
++    binary = out / ("timing_test.exe" if os.name == "nt" else "timing_test")
++    cmd = shlex.split(cc) + ["-std=c11", "-O1", "-D_POSIX_C_SOURCE=200809L",
++        "-DSNESRECOMP_TIER2_TEST=1", "-Wno-unused-parameter",
++        "-I", str(out), "-I", str(REPO / "runner/src"),
++        "-I", str(REPO / "runner/src/snes"),
++        str(REPO / "tests/timing/fixture.c"),
++        *[str(REPO / "runner/src/snes" / file) for file in
++          ("interp816.c", "tier2_capture.c", "interp_bridge.c", "cx4.c")],
++        "-lm", "-o", str(binary)]
++    (out / "build-command.json").write_text(json.dumps(cmd, indent=2) + "\n")
++    result = subprocess.run(cmd, text=True, capture_output=True)
++    (out / "build.log").write_text(result.stdout + result.stderr)
++    if result.returncode:
++        raise RuntimeError(f"compiler failed; see {out / 'build.log'}")
++    return binary
++
++
++def require(condition: bool, detail: object) -> None:
++    if not condition:
++        raise RuntimeError(str(detail))
++
++
++def run(out: Path, cc: str) -> int:
++    binary = build(out, cc)
++    results = []
++    semantic_keys = ("ok", "a", "x", "y", "s", "p", "d", "db", "m", "xf")
++    for index, case in enumerate(CASES):
++        pair = {}
++        for tier in ("interp", "aot"):
++            process = subprocess.run([str(binary), str(index), tier], cwd=out,
++                                     text=True, capture_output=True, timeout=10)
++            (out / f"{case['name']}-{tier}.log").write_text(process.stdout + process.stderr)
++            if process.returncode:
++                raise RuntimeError(f"{case['name']} {tier} failed: {process.stderr}")
++            pair[tier] = json.loads(process.stdout)
++        interp, aot = pair["interp"], pair["aot"]
++        require(interp["cpu_cycles"] == case["cpu"], (case, interp))
++        require(interp["master_cycles"] == case["master"], (case, interp))
++        require(interp["ok"] == 1 and interp["s"] == 0x01FF, (case, interp))
++        if "write" in case:
++            require(len(interp["writes"]) == 1, (case, interp))
++            require(interp["writes"][0]["master"] == case["write"], (case, interp))
++        require(all(interp[k] == aot[k] for k in semantic_keys), (case, pair))
++        require([(w["address"], w["value"]) for w in interp["writes"]] == [
++            (w["address"], w["value"]) for w in aot["writes"]], (case, pair))
++        same_clock = interp["master_cycles"] == aot["master_cycles"]
++        same_cpu = interp["cpu_cycles"] == aot["cpu_cycles"]
++        same_writes = interp["writes"] == aot["writes"]
++        result = dict(name=case["name"], **pair, cpu_cycles_equal=same_cpu,
++                      master_cycles_equal=same_clock, write_clocks_equal=same_writes,
++                      timing_equal=same_cpu and same_clock and same_writes)
++        results.append(result)
++        print(f"{case['name']}: CPU interp={interp['cpu_cycles']} AOT={aot['cpu_cycles']} "
++              f"master interp={interp['master_cycles']} AOT={aot['master_cycles']} "
++              f"write-clocks equal={same_writes} "
++              f"{'PASS' if result['timing_equal'] else 'TIMING MISMATCH'}", flush=True)
++    (out / "results.json").write_text(json.dumps(results, indent=2) + "\n")
++    mismatches = sum(not r["timing_equal"] for r in results)
++    print("Architectural and interpreter-budget checks passed; "
++          f"timing parity: {len(results)-mismatches}/{len(results)}.")
++    return int(bool(mismatches))
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--out-dir", type=Path)
++    parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
++    args = parser.parse_args()
++    try:
++        # Prevent diagnostic environment settings from changing the tested code
++        # or selecting AOT exclusions inside the bridge fixture.
++        for key in tuple(os.environ):
++            if key.startswith("SNESRECOMP_"):
++                os.environ.pop(key)
++        if args.out_dir:
++            out = args.out_dir.resolve()
++            out.mkdir(parents=True, exist_ok=False)
++            return run(out, args.cc)
++        with tempfile.TemporaryDirectory(prefix="snesrecomp-timing-") as tmp:
++            return run(Path(tmp), args.cc)
++    except (OSError, RuntimeError, subprocess.TimeoutExpired,
++            json.JSONDecodeError) as exc:
++        print(f"timing harness error: {exc}", file=sys.stderr)
++        return 2
++
++
++if __name__ == "__main__":
++    sys.exit(main())

@@ -1,112 +1,171 @@
 # snesrecomp integration
 
-This is the single source of truth for the temporary snesrecomp patch series
-required by Super Tennis.
+This is the source of truth for the snesrecomp patches required by Super Tennis.
 
-## Pinned revisions
+## Public pin and recovery patches
 
-The repository pins the submodule to the public integration commit:
+The submodule is pinned to the published integration commit
+[`3a383fb8348140cd49371641e26086f81e1b2da3`](https://github.com/craigshaw/snesrecomp/commit/3a383fb8348140cd49371641e26086f81e1b2da3)
+on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
+It contains all nineteen patches listed below. Normal setup verifies the
+committed files and leaves the dependency working tree clean.
 
-```text
-3678d0a6d7036217f26e32f6b9087d2933783690
-```
+The previous public pin was `3678d0a6d7036217f26e32f6b9087d2933783690`,
+which contained the first twelve patches. The upstream base was
+`a64932f1af958f7e71a728ac1235d6cf911f71a0`. The exported series remains
+available to reconstruct the same source from either older revision.
 
-That commit is published on
-[`craigshaw/snesrecomp`](https://github.com/craigshaw/snesrecomp/tree/codex/super-tennis-runtime)
-and is based on upstream commit:
+Patches 0013 through 0019 were published as seven ordered commits on
+12 September 2026. Their final source matches the accepted patched source
+exactly. The Python v2 and shared C suites passed before publication,
+cfg-only output matched the accepted generated code, and the 4500-frame
+title replay passed. Repinning changes dependency history and setup metadata;
+it introduces no further runtime source changes.
 
-```text
-a64932f1af958f7e71a728ac1235d6cf911f71a0
-```
+## Ordered series
 
-The same integration state can be reproduced from the upstream base with the
-twelve ordered mail patches under `patches/snesrecomp/`.
+| Patch | Purpose |
+| --- | --- |
+| `0001-Recognize-direct-long-call-trampolines.patch` | Treat source-assembled long-call forms as calls with the correct return frame. |
+| `0002-Fix-open-bus-polling-and-quiescent-resume.patch` | Correct RDNMI open-bus bits and resume parked polling loops at the hardware read. |
+| `0003-Prefer-active-interpreter-ownership-for-mixed-tier-r.patch` | Give an active interpreter continuation priority over a coincident generated ancestor. |
+| `0004-Decode-dispatch-helpers-at-observed-entry-widths.patch` | Classify dispatch helpers at observed M/X widths and retract disagreements. |
+| `0005-Add-shared-binary-input-replay-reader.patch` | Validate and play the shared two-controller `.sri` replay format. |
+| `0006-Retract-stale-exit-facts-after-unresolved-paths.patch` | Retract inferred exit facts after unresolved execution. |
+| `0007-Expose-interpreted-RTI-completion-hooks.patch` | Expose exact interpreted RTI completion to event-driven hosts. |
+| `0008-Audit-generated-charges-crossing-event-deadlines.patch` | Report generated clock charges that cross host event deadlines. |
+| `0009-Add-audit-guided-event-precision-path.patch` | Route affected variants through an audit-guided interpreter precision path. |
+| `0010-Replay-Mode-7-raster-state-in-frame-hosts.patch` | Replay scanline-timed display state from generated and emulated writes. |
+| `0011-Preserve-BG3-raster-character-addressing.patch` | Preserve active-display BG34NBA changes in raster replay. |
+| `0012-Deliver-delayed-enable-NMI-requests.patch` | Raise a pending NMI when software enables it during active vblank. |
+| `0013-Add-ROM-free-timing-differential-tests.patch` | Add ROM-free generated/interpreter timing comparisons. |
+| `0014-Preserve-folded-taken-branch-cycle.patch` | Preserve the extra CPU cycle for a constant-folded taken branch. |
+| `0015-Correct-indexed-write-cycle-modifiers.patch` | Correct indexed store/RMW CPU-cycle modifiers in the interpreter and generator. |
+| `0016-Add-opt-in-generated-bus-clock-accounting.patch` | Add opt-in generated bus-clock accounting and cache-key coverage. |
+| `0017-Add-selected-native-leaf-instruction-timing.patch` | Add selected native leaf instruction timing with shared runtime completion. |
+| `0018-Decouple-selected-leaf-from-global-bus-timing.patch` | Allow selected leaf timing with global bus timing disabled. |
+| `0019-Extend-native-leaf-timing-and-sample-IRQ.patch` | Extend selected leaf timing to local branches and arithmetic; sample IRQ at instruction and return boundaries. |
 
-## Patch series
+All patches contain game-neutral implementation or synthetic tests. ROMs,
+generated title code, profiles, recordings and private reports are excluded.
 
-| Patch | Source commit | Purpose |
-| --- | --- | --- |
-| `0001-Recognize-direct-long-call-trampolines.patch` | `be3a03d` | Treat source-assembled long-call forms as calls and emit the correct return frame. |
-| `0002-Fix-open-bus-polling-and-quiescent-resume.patch` | `dc5ee06` | Correct RDNMI open-bus bits and resume parked polling loops at the hardware read. |
-| `0003-Prefer-active-interpreter-ownership-for-mixed-tier-r.patch` | `152c8d0` | Give an active interpreter continuation priority over a coincident generated ancestor. |
-| `0004-Decode-dispatch-helpers-at-observed-entry-widths.patch` | `028450f` | Classify dispatch helpers at observed M/X widths and retract disagreements. |
-| `0005-Add-shared-binary-input-replay-reader.patch` | `1ce52cc` | Validate and play the shared two-controller `.sri` replay format. |
-| `0006-Retract-stale-exit-facts-after-unresolved-paths.patch` | `b1453e9` | Retract inferred exit facts when later analysis exposes unresolved execution. |
-| `0007-Expose-interpreted-RTI-completion-hooks.patch` | `303ced1` | Let event-driven hosts observe an exact interpreted RTI continuation. |
-| `0008-Audit-generated-charges-crossing-event-deadlines.patch` | `d44bda6` | Report generated clock charges that span host event deadlines. |
-| `0009-Add-audit-guided-event-precision-path.patch` | `0e559d2` | Route only affected generated variants through instruction-timed execution. |
-| `0010-Replay-Mode-7-raster-state-in-frame-hosts.patch` | `503c79c` | Replay scanline-timed display state from generated and emulated writes. |
-| `0011-Preserve-BG3-raster-character-addressing.patch` | `e70e901` | Include active-display BG34NBA changes in raster replay. |
-| `0012-Deliver-delayed-enable-NMI-requests.patch` | `3678d0a` | Raise a pending NMI when software enables it during active vblank. |
+## Applying and verifying
 
-The patches contain game-neutral implementation and synthetic or ROM-free
-tests. They do not contain the Super Tennis ROM, generated title code, title
-configuration, or private evidence.
-
-## Integrity
-
-The expected SHA-256 values are:
-
-```text
-958cafffd9de2c0ddc7e70806ed0e1f88a996a4f1286d68b301677681df5b88e  0001
-21c4cce8e25e8bf36dc37cff3d04976bc78d266340bcad76a01d196dbdeb9cd0  0002
-bcdb19fc70054aed8d5bd954052c10ef591ab575fd15caeb759842e0c5cb02d0  0003
-3a0e26315e7fde43baf504f02c7f729dbadfb6dd9430dbf7add2fae47a020d28  0004
-a2ac4b3e6f08aa258416db15a4ab879f6ab2453bb8993349449e54c7d6459149  0005
-027cde5c0d18e98a7615946ac333c1eeb84dab84de42b42dd0b456b90d1b8651  0006
-c92b3cde3589f1323707c073b4658a58dd9172533d916b3b572103e9540228c1  0007
-fe32ded54bffde3f83436bce06a9807c170605c1590853d87bf2e8d3eb0ff965  0008
-4c1aa6e2c2e47989deead6d210f046791dcf9ba0367e7b4d73bd90eab9f65721  0009
-bbe0d5623aa6d3ba9ed58fc1808b4864741a89ab2c9e36d4af7c30660ea94b7e  0010
-29c6af194ea7a79839f2450bd46fa77178771c75a360935acb1e7716911c47f6  0011
-b7ab7b58ba8a6fa7dd47b262cfb5988c7e080fd5712855f725b982b21ec243af  0012
-```
-
-Verify them from the repository root with:
-
-```sh
-sha256sum patches/snesrecomp/*.patch
-```
-
-On macOS, use `shasum -a 256` if `sha256sum` is unavailable.
-
-## Applying
+On macOS or Linux:
 
 ```sh
 git submodule update --init
 sh tools/apply-snesrecomp-patches.sh
+sh tools/apply-snesrecomp-patches.sh --check
 ```
 
-The script accepts either the pinned public integration commit or the expected
-upstream base. It refuses a dirty or unexpected dependency and is safe to run
-again when all twelve patch subjects are already present.
-
-## Verification
-
-After changing the dependency or patch series, regenerate and build the title,
-then run:
+On Windows, `build.ps1` and `tools/regenerate.ps1` verify the same series
+using the selected Python interpreter. The underlying command is also
+available directly on every platform:
 
 ```sh
-python3 snesrecomp/tests/v2/run_tests.py
-bash snesrecomp/tests/run_c_tests.sh
+python tools/apply-snesrecomp-patches.py
+python tools/apply-snesrecomp-patches.py --check
 ```
 
-Run the neutral headless check and the relevant private title replay as
-described in [`AGENTS.md`](../AGENTS.md). Test totals and replay lengths are
-intentionally not recorded here because they change as coverage grows.
+The tool verifies the current public pin without applying patches. It also
+accepts the previous public pin or upstream base for recovery, applying seven
+or nineteen patches respectively to a clean checkout. It verifies patch
+SHA-256 values and the contents of all 55 affected files against
+[`series.json`](../patches/snesrecomp/series.json). Source-file comparisons
+normalise CRLF line endings for Windows; patch files retain their exact bytes.
+An already complete series is verified without writing. An incomplete series
+on a modified checkout is refused, preserving local changes. Unrelated changes
+are left alone when all required patched files already match.
+
+`--check` never writes. Normal generation and `build.sh` use this check, so the
+old public pin alone cannot silently stand in for the required fixes. Windows
+also checks the dependency when `-SkipGenerate` is used. Use `--dependency PATH`
+only when intentionally applying or verifying a separate checkout.
+
+For recovery, preserve any local work before restoring the pinned checkout.
+Do not reset or discard dependency changes just to make the applicator pass.
+
+## Normal generation policy
+
+The tracked cfg declares the observed `$00:C3DE M1X0` and `$00:C7A0 M1X0`
+entries. Both platform regeneration scripts call `tools/generate-normal.py`,
+which enables cfg roots and selects exactly these two native leaves for
+instruction timing. No profile manifest is required. Global bus timing remains
+disabled, and inherited experimental generation settings are cleared.
+
+The shared helper keeps the existing event diagnostics available through
+explicit `--event-crossing-audit` and `--event-precision-profile` options.
+The title diagnostic scripts use these options. For other experiments, invoke
+the snesrecomp emitter directly into a private output directory.
+
+Instruction timing commits each opcode after its effects and runs the same
+refresh, beam, coprocessor and APU completion work as the interpreter. Selected
+bodies check deadlines, NMI and unmasked pending IRQ before each instruction
+and after popping a return frame. Emulation-mode invocations use the
+interpreter. Unselected bodies retain their existing generation policy.
+
+Supported selected leaves have tested load/store operations, local branches,
+CMP, ADC and accumulator ASL. Calls, external branch targets, indirect
+addressing, stack manipulation, memory RMW, RTI and block moves remain outside
+this mode. Unsupported selections fail generation.
+
+## Evidence and limits
+
+The 173-body candidate passed all 18,534 checked frames across five private
+replays and a neutral run against the corrected 172-body control. The added
+C3DE body removed 1,250,136 interpreted calls in those comparisons. Repeated
+bounded Mesen observations confirmed both exact native entry modes. A cfg-only
+proposal reproduced the accepted profile-generated manifest and all six C
+files. The maintainer reports correct gameplay with no noticeable change;
+the captured session exited normally with no bailouts or capture loss.
+
+Patch 0019 fixes a specific pending-IRQ gap exposed at frame 2893 of one replay.
+The earlier selected body continued for 312 master clocks after the interpreter
+would have stopped. Shared IRQ sampling and the return-boundary check restore
+parity in all recorded comparisons. These results validate the selected bodies,
+not every new profile candidate or whole-game hardware accuracy.
+
+The original broader timing diagnostic remains a known failing investigation:
+
+```sh
+python3 snesrecomp/tests/timing/run.py --out-dir captures/timing-check
+python3 snesrecomp/tests/timing/run.py --bus-timing --out-dir captures/timing-bus-check
+```
+
+Use fresh private output directories. The bus model fixes the fourteen initial
+final-clock totals, but five write-timestamp comparisons still differ. Broader
+byte-write ordering and generated block precharge remain limits. These are
+separate from the passing bounded instruction-timing tests and do not justify
+enabling global bus timing. See [AOT_COVERAGE.md](AOT_COVERAGE.md) for the wider
+coverage workflow and evidence distinctions.
+
+## Required checks
+
+After dependency or generation changes, run:
+
+```sh
+python3 tools/test-build-workflow.py
+python3 snesrecomp/tests/v2/run_tests.py
+bash snesrecomp/tests/run_c_tests.sh
+sh tools/check-publication-boundary.sh
+```
+
+Regenerate and build the title, then run the neutral check and relevant private
+replays described in [`AGENTS.md`](../AGENTS.md). Final promotion must compare
+fresh normal cfg-generated output and behaviour with the accepted candidate.
+Record any platform that was not executed. Patch application tests cover clean
+setup, repeat setup, modified/partial refusal and CRLF checkout behaviour.
 
 ## Upstreaming
 
-The integration commit is published on the project owner's fork. The ordered
-patch files remain the portable review and recovery form until the required
-changes are accepted upstream.
+All nineteen fixes are published on the project owner's integration branch
+and included in the title pin. The exported patches remain the recovery and
+review form until the required fixes are accepted upstream. For later updates:
 
-Before replacing the patch series:
-
-1. Rebase each logical change against current snesrecomp upstream.
-2. Preserve its synthetic tests.
-3. Run the Python, C, and relevant Rust suites.
-4. Submit the changes through normal upstream review.
-5. Pin this repository to a public commit containing every required change.
-6. Rerun the title regressions before deleting the superseded patches and
-   application script.
+1. Rebase each logical change against the intended upstream revision.
+2. Preserve its synthetic tests and run the relevant Python, C and Rust suites.
+3. Submit through normal upstream review and publish the resulting revision.
+4. Pin this repository to a public commit containing all required fixes.
+5. Rerun cfg-only generation and title regressions before removing superseded
+   patches or changing the application tool.

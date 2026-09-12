@@ -1,0 +1,138 @@
+diff --git a/recompiler/snes_cycles.py b/recompiler/snes_cycles.py
+--- a/recompiler/snes_cycles.py
++++ b/recompiler/snes_cycles.py
+@@ -283,8 +283,8 @@
+     mn, mode = _info(op)
+     if mode not in _XCROSS_MODES:
+         return 0
+-    if mn in _STORE_MNEMS:
+-        return 0                        # stores pay a fixed cost, no cross add
++    if mn in _STORE_MNEMS or mn in _RMW_MNEMS:
++        return 0                        # writes pay a fixed cost, no cross add
+     return 1
+ 
+ 
+diff --git a/runner/src/snes/interp816.c b/runner/src/snes/interp816.c
+--- a/runner/src/snes/interp816.c
++++ b/runner/src/snes/interp816.c
+@@ -365,8 +365,9 @@
+   if(cpu->dp & 0xff) cpu->cyclesUsed++; // dpr not 0: 1 extra cycle
+   uint16_t pointer = interp816_readWord(cpu, (cpu->dp + adr) & 0xffff, (cpu->dp + adr + 1) & 0xffff);
+   bool crossed = (pointer >> 8) != ((pointer + cpu->y) >> 8);
+-  if(write ? (!cpu->xf || crossed) : crossed) cpu->cyclesUsed++;
+-  // writes: x = 0 or page crossed; reads: page crossed
++  /* Store/RMW base costs already include the indexed internal cycle.
++   * Only reads add the conditional page-cross cycle here. */
++  if(!write && crossed) cpu->cyclesUsed++;
+   *low = ((cpu->db << 16) + pointer + cpu->y) & 0xffffff;
+   return ((cpu->db << 16) + pointer + cpu->y + 1) & 0xffffff;
+ }
+@@ -411,8 +412,9 @@
+ static uint32_t interp816_adrAbx(Interp816* cpu, uint32_t* low, bool write) {
+   uint16_t adr = interp816_readOpcodeWord(cpu);
+   bool crossed = (adr >> 8) != ((adr + cpu->x) >> 8);
+-  if(write ? (!cpu->xf || crossed) : crossed) cpu->cyclesUsed++;
+-  // writes: x = 0 or page crossed; reads: page crossed
++  /* Store/RMW base costs already include the indexed internal cycle.
++   * Only reads add the conditional page-cross cycle here. */
++  if(!write && crossed) cpu->cyclesUsed++;
+   *low = ((cpu->db << 16) + adr + cpu->x) & 0xffffff;
+   return ((cpu->db << 16) + adr + cpu->x + 1) & 0xffffff;
+ }
+@@ -420,8 +422,9 @@
+ static uint32_t interp816_adrAby(Interp816* cpu, uint32_t* low, bool write) {
+   uint16_t adr = interp816_readOpcodeWord(cpu);
+   bool crossed = (adr >> 8) != ((adr + cpu->y) >> 8);
+-  if(write ? (!cpu->xf || crossed) : crossed) cpu->cyclesUsed++;
+-  // writes: x = 0 or page crossed; reads: page crossed
++  /* Store/RMW base costs already include the indexed internal cycle.
++   * Only reads add the conditional page-cross cycle here. */
++  if(!write && crossed) cpu->cyclesUsed++;
+   *low = ((cpu->db << 16) + adr + cpu->y) & 0xffffff;
+   return ((cpu->db << 16) + adr + cpu->y + 1) & 0xffffff;
+ }
+diff --git a/runner/src/snes/snes_cycles.h b/runner/src/snes/snes_cycles.h
+--- a/runner/src/snes/snes_cycles.h
++++ b/runner/src/snes/snes_cycles.h
+@@ -92,21 +92,21 @@
+ };     /* added when D.l != 0 */
+ static const uint8_t SNES_XCROSS_ADD[256] = {
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0,
++     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
++     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0,
++     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
++     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
++     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0,
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0,
+-     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0,
++     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
++     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++     0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0,
+ }; /* added when index crosses a page (read ops) */
+ static const uint8_t SNES_BRANCH_CLASS[256] = {
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+diff --git a/tests/test_snes_cycles.py b/tests/test_snes_cycles.py
+--- a/tests/test_snes_cycles.py
++++ b/tests/test_snes_cycles.py
+@@ -121,6 +121,9 @@
+     assert _cyc(0xB1, index_page_cross=True) == 6   # LDA (dp),Y read +1
+     assert _cyc(0x9D, index_page_cross=True) == 5   # STA abs,X store: no cross
+     assert _cyc(0x91, index_page_cross=True) == 6   # STA (dp),Y store: no cross
++    for op in (0x1E, 0x3E, 0x5E, 0x7E, 0xDE, 0xFE):
++        assert _cyc(op, index_page_cross=True) == 7
++        assert _cyc(op, m=0, index_page_cross=True) == 9
+     assert _cyc(0xBF, index_page_cross=True) == 5   # LDA long,X: never crosses
+ 
+ 
+diff --git a/tests/interp816/interp816_test.c b/tests/interp816/interp816_test.c
+--- a/tests/interp816/interp816_test.c
++++ b/tests/interp816/interp816_test.c
+@@ -212,6 +212,31 @@
+     CHECK(cycles==6, "cycles=%d exp 6", cycles);
+     CHECK(p->a==0x9ABC, "A=%04X exp 9ABC", p->a); }
+ 
++  /* T25: indexed writes include their internal cycle in the base cost.
++   * WDC W65C816S Tables 3-1/5-4: STA abs,X/Y and STZ abs,X take five
++   * cycles in M=1, STA (dp),Y takes six, and indexed RMW takes seven.
++   * Neither index width nor page crossing adds a second index cycle. */
++  { const uint8_t ops[] = {0x9D,0x99,0x9E,0x91,0x1E,0x3E,0x5E,0x7E,0xDE,0xFE};
++    printf("T25 indexed store/RMW cycles across M/X widths and page boundaries\n");
++    for (unsigned oi=0; oi<sizeof ops; ++oi)
++      for (int m=0; m<2; ++m)
++        for (int x=0; x<2; ++x)
++          for (int cross=0; cross<2; ++cross) {
++            uint16_t addr = cross ? 0x10FF : 0x1020;
++            uint8_t code[] = {ops[oi], (uint8_t)addr, (uint8_t)(addr>>8)};
++            if (ops[oi]==0x91) code[1]=0x40;
++            Interp816 *p = prep(code, sizeof code);
++            p->e=false; p->mf=m; p->xf=x; p->x=1; p->y=1;
++            MEM[0x40]=(uint8_t)addr; MEM[0x41]=(uint8_t)(addr>>8);
++            int rmw = oi>=4;
++            int expected = (rmw ? 7 : (ops[oi]==0x91 ? 6 : 5)) +
++                           (rmw ? 2 : 1)*(1-m);
++            int cycles = interp816_runOpcode(p);
++            CHECK(cycles==expected, "op=%02X M%dX%d cross=%d cycles=%d exp %d",
++                  ops[oi],m,x,cross,cycles,expected);
++          }
++  }
++
+   printf("\n==== interp816 Phase-0: %d/%d checks passed ====\n", g_check - g_fail, g_check);
+   if (g_fail) { printf("RESULT: FAIL (%d)\n", g_fail); return 1; }
+   printf("RESULT: PASS\n");

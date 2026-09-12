@@ -1,0 +1,763 @@
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -10,6 +10,39 @@
+ 
+ def enabled():
+     return bool(os.environ.get("SNESRECOMP_EMIT_BUS_TIMING"))
++
++
++INSTRUCTION_ENV = "SNESRECOMP_EMIT_INSTRUCTION_TIMING"
++
++
++def instruction_targets():
++    """Explicit native leaf entry keys, written as HEXPC:M:X, comma separated."""
++    value = os.environ.get(INSTRUCTION_ENV, "")
++    result = set()
++    for item in value.split(",") if value else ():
++        if not re.fullmatch(r"[0-9A-Fa-f]{6}:[01]:[01]", item):
++            raise ValueError(f"{INSTRUCTION_ENV}: invalid exact entry key {item!r}")
++        pc, m, x = item.split(":")
++        result.add((int(pc, 16), int(m), int(x)))
++    if result and not enabled():
++        raise ValueError(f"{INSTRUCTION_ENV} requires SNESRECOMP_EMIT_BUS_TIMING")
++    return frozenset(result)
++
++
++def validate_instruction_leaf(block_pairs):
++    """Fail closed until calls, branches and stack transforms are supported."""
++    from snes65816 import IMP, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X, DP, DP_X, DP_Y
++    if len(block_pairs) != 1:
++        raise ValueError("instruction timing requires a single straight-line leaf block")
++    pairs = next(iter(block_pairs.values()))
++    if not pairs or pairs[-1][0].mnem not in ("RTS", "RTL"):
++        raise ValueError("instruction timing requires a final RTS or RTL")
++    for insn, _ in pairs[:-1]:
++        if (insn.mnem not in ("NOP", "LDA", "LDX", "LDY", "STA", "STX", "STY", "STZ")
++                or insn.mode not in (IMP, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X,
++                                     DP, DP_X, DP_Y)):
++            raise ValueError(f"instruction timing does not yet support {insn.mnem} at {insn.addr:06X}")
++    return pairs
+ 
+ 
+ class BusTimingLines(list):
+@@ -33,3 +66,28 @@
+         # Fetches are modelled, not executed: generated instructions contain
+         # their operands as literals. Sample MEMSEL here, not once per block.
+         self.append(f"cpu_aot_fetch_extra(cpu, 0x{self.pc:06X}u, {insn.length}, {self.audit});")
++
++
++class InstructionTimingLines(BusTimingLines):
++    """Accumulate one opcode's costs while callbacks see its start clock."""
++    def append(self, line):
++        line = re.sub(r"\bcpu_(read|write)(8|16)\(cpu,\s*",
++                      lambda m: f"cpu_aot_insn_{m[1]}{m[2]}(cpu, &_aot_timing, ", line)
++        line = line.replace("cpu->cycles +=", "_aot_timing.cycles +=")
++        line = line.replace("cpu->master_cycles +=", "_aot_timing.master +=")
++        list.append(self, line)
++
++    def instruction(self, insn, cycles):
++        self.pc = insn.addr & 0xFFFFFF
++        self.extend([
++            "if (interp_bridge_lle_master_deadline_reached(cpu)) {",
++            f"  return interp_bridge_lle_yield_unwind(cpu, 0x{self.pc:06X}u);",
++            "}",
++            "cpu->coprocessor_master_cycles = cpu->master_cycles;",
++            f"_aot_timing = (CpuAotInstructionTiming){{{cycles}, {cycles * 6}}};",
++            f"cpu_aot_insn_bus_extra(&_aot_timing, {self.pc >> 16}, "
++            f"0x{self.pc & 0xFFFF:04X}, {insn.length});",
++        ])
++
++    def commit(self):
++        return f"cpu_aot_insn_commit(cpu, &_aot_timing, 0x{self.pc:06X}u, {self.audit});"
+diff --git a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+--- a/recompiler/v2/codegen.py
++++ b/recompiler/v2/codegen.py
+@@ -2285,7 +2285,7 @@
+     return lines
+ 
+ 
+-def _emit_return(op: Return) -> List[str]:
++def _emit_return(op: Return, instruction_commit: Optional[str] = None) -> List[str]:
+     """RTS / RTL / RTI emit. Reads + clears the function-LOCAL
+     `_pending_skip` (set by an upstream NLR-pattern block on the same
+     path) and returns its value. NORMAL paths get _pending_skip == 0
+@@ -2380,6 +2380,8 @@
+         lines.append("  uint8 _rpb = cpu_read8(cpu, 0x00, cpu->S);")
+     else:
+         lines.append("  uint8 _rpb = cpu->PB;")
++    if instruction_commit:
++        lines.append("  " + instruction_commit)
+     # Frame size this RTS/RTL pops (RTS = 2 bytes, RTL = 3). The dispatch
+     # miss-restore below must reflect that this function popped its OWN return
+     # frame, i.e. restore S to entry_s + frame_size — NOT bare entry_s.
+@@ -2655,7 +2657,8 @@
+ }
+ 
+ 
+-def emit_op(op: IROp, source_pc24: Optional[int] = None) -> List[str]:
++def emit_op(op: IROp, source_pc24: Optional[int] = None, *,
++            instruction_commit: Optional[str] = None) -> List[str]:
+     """Lower a single IR op to one or more lines of C."""
+     h = _DISPATCH.get(type(op))
+     if h is None:
+@@ -2664,6 +2667,9 @@
+     old_source_pc24 = _CURRENT_SOURCE_PC24
+     _CURRENT_SOURCE_PC24 = (int(source_pc24) & 0xFFFFFF) if source_pc24 is not None else 0
+     try:
++        if instruction_commit is not None:
++            assert isinstance(op, Return) and not op.interrupt
++            return _emit_return(op, instruction_commit)
+         return [ln for ln in h(op) if ln]
+     finally:
+         _CURRENT_SOURCE_PC24 = old_source_pc24
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -841,6 +841,11 @@
+             flat.extend(ops)
+         block_per_insn_ir[key] = pairs
+         block_ir[key] = flat
++
++    instruction_timing = (
++        (bank << 16 | start, entry_m, entry_x) in bus_timing.instruction_targets())
++    if instruction_timing:
++        bus_timing.validate_instruction_leaf(block_per_insn_ir)
+ 
+     # ── Non-local-return idiom detection ────────────────────────────────
+     # A basic block is an NLR-block if its IR has the shape
+@@ -1374,7 +1379,8 @@
+ 
+     for key in block_order:
+         block = cfg.blocks[key]
+-        lines: List[str] = bus_timing.BusTimingLines() if bus_timing.enabled() else []
++        lines: List[str] = (bus_timing.InstructionTimingLines() if instruction_timing
++                           else bus_timing.BusTimingLines() if bus_timing.enabled() else [])
+         block_terminated = False  # True if last op was branch/goto/return/call
+         # Axis-5: master-clocks-per-CPU-cycle for this block's code region, used
+         # to weight the dynamic (D.l/page-cross/branch-taken) master charges.
+@@ -1499,7 +1505,9 @@
+                   f'skip_emit_idx={sorted(skip_emit_idx)}',
+                   file=_sys.stderr, flush=True)
+         for ii, (di_insn, ir_ops) in enumerate(pairs):
+-            if bus_timing.enabled():
++            if instruction_timing:
++                lines.instruction(di_insn, _block_cycle_const([(di_insn, ir_ops)]))
++            elif bus_timing.enabled():
+                 lines.instruction(di_insn)
+             # NLR: inject _pending_skip setter + diagnostics RIGHT BEFORE
+             # the terminator insn. This ensures any preceding setup ops
+@@ -1541,7 +1549,7 @@
+             _audit_pc24 = getattr(
+                 di_insn, 'addr', (bank << 16) | (key.pc & 0xFFFF))
+             for _ln in _dynamic_charge_lines(
+-                    di_insn, _blk_spd_expr, _audit_pc24):
++                    di_insn, _blk_spd_expr, None if instruction_timing else _audit_pc24):
+                 lines.append(_ln)
+             for op in ir_ops:
+                 if isinstance(op, CondBranch):
+@@ -1782,7 +1790,8 @@
+                                 )
+                         block_terminated = True
+                 elif isinstance(op, Return):
+-                    for ln in emit_op(op, getattr(di_insn, 'addr', None)):
++                    for ln in emit_op(op, getattr(di_insn, 'addr', None),
++                                      instruction_commit=lines.commit() if instruction_timing else None):
+                         lines.append(ln)
+                     block_terminated = True
+                 elif isinstance(op, IndirectGoto):
+@@ -1993,6 +2002,8 @@
+                     # ReadReg, ALU, Read/Write, etc. — non-terminating.
+                     for ln in emit_op(op, getattr(di_insn, 'addr', None)):
+                         lines.append(ln)
++            if instruction_timing and di_insn.mnem not in ('RTS', 'RTL'):
++                lines.append(lines.commit())
+         # NLR with no terminator IR (block IR was pure-PullReg, like
+         # $01:A3CB's [PLA, PLA, fall-through]). The SKIP setter wasn't
+         # injected during the per-insn loop because there was no
+@@ -2152,6 +2163,12 @@
+             f'  if (rtl_aot_node_denied(0x{fn_entry_pc:06X}u)) {{ '
+             f'RecompStackPop(); return interp_tier_dispatch_balanced('
+             f'cpu, 0x{fn_entry_pc:06X}u, 0x{fn_entry_pc:06X}u, _entry_s, _hrv); }}')
++    if instruction_timing:
++        src.append(
++            f'  if (cpu->emulation) {{ RecompStackPop(); '
++            f'return interp_tier_dispatch_balanced(cpu, 0x{fn_entry_pc:06X}u, '
++            f'0x{fn_entry_pc:06X}u, _entry_s, _hrv); }} '
++            f'/* instruction timing currently supports native mode only */')
+     src.append(f'  uint32 _host_return_pc24 = 0xFFFFFFFFu;')
+     src.append(f'  if (_hrv == 2 || _hrv == 3) {{')
+     src.append(f'    uint16 _host_rpcl = cpu_read8(cpu, 0x00, (uint16)(_entry_s + 1u));')
+@@ -2163,6 +2180,8 @@
+     src.append(f'  (void)_entry_s;  /* used by trampoline balance check */')
+     src.append(f'  (void)_hrv;')
+     src.append(f'  (void)_host_return_pc24;')
++    if instruction_timing:
++        src.append('  CpuAotInstructionTiming _aot_timing;')
+     # Record this frame's entry-S parallel to the recomp call stack so a
+     # return-to-ancestor RTS (manual PLA/PLX/PLB rebalance + RTS) can be
+     # resolved to a SKIP_N non-local return (cpu_resolve_ancestor_skip).
+@@ -2202,7 +2221,7 @@
+         # Axis-5: also charge the region-weighted MASTER clocks (CPU cycles x
+         # code-region speed) into cpu->master_cycles, which paces the SPC700.
+         _cyc_const = _block_cycle_const(block_per_insn_ir.get(key, []))
+-        if _cyc_const:
++        if _cyc_const and not instruction_timing:
+             src.append(f'    cpu->cycles += {_cyc_const};')
+             _spd_expr, _spd_const = _block_speed(bank, key.pc)
+             if bus_timing.enabled():
+diff --git a/runner/src/snes/aot_bus_timing.h b/runner/src/snes/aot_bus_timing.h
+--- a/runner/src/snes/aot_bus_timing.h
++++ b/runner/src/snes/aot_bus_timing.h
+@@ -51,4 +51,45 @@
+     cpu_aot_bus_extra(cpu, pc, audit, bank, addr, 2);
+     cpu_write16(cpu, bank, addr, value);
+ }
++
++/* Opt-in straight-line leaf timing. Like interp_bridge_runOpcode, callbacks
++ * observe the start of the instruction. This is not physical bus-edge timing.
++ * Keep pending costs local so no future clock is visible to an MMIO callback. */
++typedef struct CpuAotInstructionTiming {
++    unsigned cycles;
++    unsigned master;
++} CpuAotInstructionTiming;
++
++static inline void cpu_aot_insn_bus_extra(CpuAotInstructionTiming *timing,
++                                         uint8 bank, uint16 addr, unsigned bytes) {
++    for (unsigned i = 0; i < bytes; ++i)
++        timing->master += (unsigned)snes_region_speed(((uint32)bank << 16) |
++            (uint16)(addr + i), g_memsel) - SNES_CYC_INTERNAL;
++}
++
++static inline uint8 cpu_aot_insn_read8(CpuState *cpu, CpuAotInstructionTiming *timing,
++                                      uint8 bank, uint16 addr) {
++    cpu_aot_insn_bus_extra(timing, bank, addr, 1);
++    return cpu_read8(cpu, bank, addr);
++}
++static inline uint16 cpu_aot_insn_read16(CpuState *cpu, CpuAotInstructionTiming *timing,
++                                        uint8 bank, uint16 addr) {
++    cpu_aot_insn_bus_extra(timing, bank, addr, 2);
++    return cpu_read16(cpu, bank, addr);
++}
++static inline void cpu_aot_insn_write8(CpuState *cpu, CpuAotInstructionTiming *timing,
++                                      uint8 bank, uint16 addr, uint8 value) {
++    cpu_aot_insn_bus_extra(timing, bank, addr, 1);
++    cpu_write8(cpu, bank, addr, value);
++}
++static inline void cpu_aot_insn_write16(CpuState *cpu, CpuAotInstructionTiming *timing,
++                                       uint8 bank, uint16 addr, uint16 value) {
++    cpu_aot_insn_bus_extra(timing, bank, addr, 2);
++    cpu_write16(cpu, bank, addr, value);
++}
++static inline void cpu_aot_insn_commit(CpuState *cpu, CpuAotInstructionTiming *timing,
++                                      uint32 pc, int audit) {
++    if (audit) interp_bridge_event_audit_charge(cpu, pc, timing->master);
++    interp_bridge_commit_instruction(cpu, timing->cycles, timing->master);
++}
+ #endif
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -98,6 +98,28 @@
+     RtlApuUnlock();
+     s_apu_pending_master = 0;
+ }
++void interp_bridge_commit_instruction(CpuState *cpu, unsigned cycles,
++                                      uint64_t master) {
++    cpu->cycles += cycles;
++    cpu->master_cycles += master;
++    snes_refresh_charge();
++    cpu->coprocessor_master_cycles = cpu->master_cycles;
++    if (g_snes) snes_sync_master_clock(g_snes, cpu->master_cycles);
++    if (g_snes && g_snes->cart)
++        cart_sync_coprocessors(g_snes->cart, cpu->master_cycles);
++#ifdef SNES_COSIM
++    if (!cosim_apu_shared_clock())
++#endif
++    {
++        if (!interp_bridge_use_absolute_apu_timeline(
++                rtl_apu_frame_timeline_active(),
++                g_snes && cart_has_sa1(g_snes->cart))) {
++            s_apu_pending_master += master;
++            if (s_apu_pending_master >= 4096) bridge_apu_flush(cpu);
++        }
++    }
++}
++
+ static int bridge_is_apu_port(uint32_t adr) {
+     uint16_t a = (uint16_t)(adr & 0xFFFF);
+     if (a < 0x2140 || a > 0x217F) return 0;
+@@ -1479,34 +1501,7 @@
+             unsigned _internal = (unsigned)_cyc > s_interp_bus_cycles
+                                ? (unsigned)_cyc - s_interp_bus_cycles : 0;
+             uint64_t _master = s_interp_bus_master + (uint64_t)_internal * 6u;
+-            cpu->cycles        += (uint64_t)_cyc;
+-            cpu->master_cycles += _master;
+-            /* DRAM refresh tax — shared watermark with the AOT tier's
+-             * WatchdogCheck charge; see common_cpu_infra.c. */
+-            snes_refresh_charge();
+-            cpu->coprocessor_master_cycles = cpu->master_cycles;
+-            if (g_snes) snes_sync_master_clock(g_snes, cpu->master_cycles);
+-            if (g_snes && g_snes->cart)
+-                cart_sync_coprocessors(g_snes->cart, cpu->master_cycles);
+-#ifdef SNES_COSIM
+-            /* Shared APU clock (common_rtl.h): the guest-time advance is a
+-             * per-side clock (master-cycle accounting differs between the
+-             * interp and compiled models), so under SNES_COSIM_APU_SHARED the
+-             * SPC is paced ONLY by the HW-touch estimate — identical on both
+-             * sides of an A/B pair. The opcode's own port access (if any)
+-             * paces via rtl_accumulate_apu_catchup like compiled code. */
+-            if (!cosim_apu_shared_clock())
+-#endif
+-            {
+-                /* Guest-time APU, batched (see bridge_apu_flush): accumulate;
+-                 * convert on APU-port access / ~4096 master / exits. */
+-                if (!interp_bridge_use_absolute_apu_timeline(
+-                        rtl_apu_frame_timeline_active(),
+-                        g_snes && cart_has_sa1(g_snes->cart))) {
+-                    s_apu_pending_master += _master;
+-                    if (s_apu_pending_master >= 4096) bridge_apu_flush(cpu);
+-                }
+-            }
++            interp_bridge_commit_instruction(cpu, (unsigned)_cyc, _master);
+         }
+ 
+         if (auto_quiescent &&
+diff --git a/runner/src/snes/interp_bridge.h b/runner/src/snes/interp_bridge.h
+--- a/runner/src/snes/interp_bridge.h
++++ b/runner/src/snes/interp_bridge.h
+@@ -71,6 +71,11 @@
+  *   0 = the bridge bailed (iteration cap / contained failure).
+  */
+ int interp_bridge_run(CpuState *cpu, uint32_t entry_pc24);
++
++/* Finish one native opcode, after its bus callbacks. Used by the interpreter
++ * and opt-in generated leaf timing, with the same refresh, beam and APU work. */
++void interp_bridge_commit_instruction(CpuState *cpu, unsigned cycles,
++                                      uint64_t master);
+ 
+ /* Faithful LLE of an infinite cooperative-scheduler loop (e.g. MMX's $8099 task
+  * scheduler): run the real ROM scheduler under interp816 from entry_pc24 and
+diff --git a/tests/run_c_tests.sh b/tests/run_c_tests.sh
+--- a/tests/run_c_tests.sh
++++ b/tests/run_c_tests.sh
+@@ -91,6 +91,7 @@
+ 
+ echo "=== generated/interpreted final bus clocks ==="
+ python3 "$ROOT/tests/timing/test_bus_clocks.py"
++python3 "$ROOT/tests/timing/test_instruction_timing.py"
+ 
+ echo "=== DSP-1 bus/core shell ==="
+ "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -137,3 +137,43 @@
+ instruction versus block write timing, and preservation of branch timing
+ through optimisation. After a fix, retain these tests and rerun title-level
+ frame/state comparisons before accepting additional AOT roots.
++
++## Opt-in native leaf instruction timing
++
++`SNESRECOMP_EMIT_INSTRUCTION_TIMING=008000:1:0,008100:0:1` selects exact
++generated entry keys as `HEXPC:M:X`. It requires
++`SNESRECOMP_EMIT_BUS_TIMING=1`. Both options participate in the output cache
++key. Unselected bodies retain the previous bus-accounting mode.
++
++This bounded implementation accepts a single straight-line block ending in
++RTS or RTL. Its preceding instructions can be NOP, LDA/LDX/LDY,
++STA/STX/STY/STZ with immediate, direct-page, absolute or long addressing,
++including their supported indexed forms. Unsupported selected bodies fail
++generation. Emulation-mode invocations use the interpreter. Calls, branches,
++stack manipulation, indirect addressing, RMW, RTI and block moves are outside
++this instruction-timing experiment.
++
++Each instruction accumulates costs locally while callbacks observe the
++instruction's start clock, matching the bridge convention. Return-frame
++reads finish before committing the return instruction. A shared bridge
++completion function advances CPU/master clocks, refresh accounting, beam and
++coprocessors, and the existing APU accumulator. Each next instruction checks
++the scheduler deadline and pending NMI before doing any work. An unwind
++retains the exact next PC and live guest stack for interpreter resumption.
++
++```sh
++python3 tests/timing/test_instruction_timing.py
++```
++
++This test runs 143 complete leaf comparisons, including write timestamps and
++byte order, and 32 real bridge scheduler exit/resume comparisons. It covers
++exact deadline boundaries, delayed-enable NMI, a simulated refresh delay and
++a simulated beam-triggered NMI. The event fixture also compares APU time
++accumulation. These peripheral hooks are test doubles, not hardware models.
++The shared C suite includes this test and checks that older timing modes
++keep their existing results.
++
++The supported instruction list is a bounded experiment, not a claim of
++general MMIO equivalence. APU-port handshakes, DMA, real peripheral timing,
++optimised calls and other control paths still need title-level validation.
++No new generation option is enabled by default.
+diff --git a/tests/timing/fixture.c b/tests/timing/fixture.c
+--- a/tests/timing/fixture.c
++++ b/tests/timing/fixture.c
+@@ -4,10 +4,18 @@
+ #define main bridge_contract_main
+ #define cpu_write8 bridge_fixture_write8
+ #define cpu_write16 bridge_fixture_write16
++#define cpu_dispatch_has_entry bridge_fixture_has_entry
++#define cpu_dispatch_pc_paired bridge_fixture_paired
++#define snes_refresh_charge bridge_fixture_refresh
++#define snes_sync_master_clock bridge_fixture_sync_master
+ #include "../interp816/bridge_test.c"
+ #undef main
+ #undef cpu_write8
+ #undef cpu_write16
++#undef cpu_dispatch_has_entry
++#undef cpu_dispatch_pc_paired
++#undef snes_refresh_charge
++#undef snes_sync_master_clock
+ #include "cpu_trace.h"
+ 
+ typedef struct TimingWrite {
+@@ -18,6 +26,37 @@
+ static TimingWrite writes[32];
+ static unsigned write_count;
+ static int recording;
++static uint32 event_entry;
++static RecompReturn (*event_body)(CpuState *);
++static uint64_t refresh_at, beam_nmi_at, last_sync;
++static unsigned refresh_count, sync_count;
++
++void snes_refresh_charge(void) {
++    refresh_count++;
++    if (refresh_at && g_c.master_cycles >= refresh_at) {
++        g_c.master_cycles += 40;
++        refresh_at = 0;
++    }
++}
++void snes_sync_master_clock(Snes *snes, uint64_t master) {
++    sync_count++;
++    last_sync = master;
++    if (beam_nmi_at && master >= beam_nmi_at) {
++        snes->nmiPending = true;
++        beam_nmi_at = 0;
++    }
++}
++
++int cpu_dispatch_has_entry(CpuState *cpu, uint32 pc) {
++    return event_entry ? event_body && pc == event_entry : bridge_fixture_has_entry(cpu, pc);
++}
++RecompReturn cpu_dispatch_pc_paired(CpuState *cpu, uint32 pc, uint8 frame_size) {
++    if (event_body && pc == event_entry) {
++        cpu->host_return_valid = frame_size;
++        return event_body(cpu);
++    }
++    return bridge_fixture_paired(cpu, pc, frame_size);
++}
+ 
+ void cpu_write8(CpuState *cpu, uint8 bank, uint16 address, uint8 value) {
+     if (recording) {
+@@ -26,6 +65,7 @@
+             ((uint32)bank << 16) | address, value, cpu->master_cycles};
+     }
+     bridge_fixture_write8(cpu, bank, address, value);
++    if (bank == 0 && address == 0x420D) g_memsel = value & 1;
+ }
+ void cpu_write16(CpuState *cpu, uint8 bank, uint16 address, uint16 value) {
+     cpu_write8(cpu, bank, address, (uint8)value);
+@@ -45,7 +85,7 @@
+ #include "timing_cases.inc"
+ 
+ int main(int argc, char **argv) {
+-    if (argc != 3) return 2;
++    if (argc < 3 || argc > 5) return 2;
+     unsigned index = (unsigned)strtoul(argv[1], NULL, 10);
+     if (index >= sizeof(cases) / sizeof(cases[0])) return 2;
+     const TimingCase *test = &cases[index];
+@@ -71,6 +111,12 @@
+     RAM[0x01FE] = 0x8F;
+     RAM[0x01FF] = 0;
+     g_c.host_return_valid = 3;
++    if (test->code[test->size - 1] == 0x60) {
++        g_c.S = 0x01FD;
++        RAM[0x01FE] = 0xFF;
++        RAM[0x01FF] = 0x8F;
++        g_c.host_return_valid = 2;
++    }
+     int interrupt = test->code[test->size - 1] == 0x40;
+     if (interrupt) {
+         g_c.S = 0x01FB;
+@@ -81,7 +127,33 @@
+     }
+     recording = 1;
+     int ok;
+-    if (!strcmp(argv[2], "aot"))
++    if (argc >= 4) {
++        event_entry = test->pc;
++        if (!strcmp(argv[2], "event-aot")) event_body = test->body;
++        else if (strcmp(argv[2], "event-interp")) return 2;
++        g_c.S = 0x01FF;
++        const uint8 scheduler[] = {0x22, test->pc, test->pc >> 8, test->pc >> 16,
++                                   0xA9, 0x5A, 0xCB};
++        load(0x7000, scheduler, sizeof scheduler);
++        if (!strcmp(argv[3], "nmi")) {
++            g_test_snes.inNmi = true;
++            g_test_snes.inVblank = true;
++        } else if (!strcmp(argv[3], "refresh")) {
++            refresh_at = 90;
++            interp_bridge_set_master_deadline(120);
++        } else if (!strcmp(argv[3], "beam-nmi")) {
++            beam_nmi_at = 90;
++        } else {
++            interp_bridge_set_master_deadline(strtoull(argv[3], NULL, 10));
++        }
++        ok = interp_bridge_run_until_quiescent(&g_c, 0x007000) == 1;
++        if (argc == 5 && !strcmp(argv[4], "resume")) {
++            const uint32 resume = interp_bridge_lle_resume_pc();
++            interp_bridge_set_master_deadline(1000);
++            g_test_snes.nmiPending = false;
++            ok = ok && interp_bridge_run_until_quiescent(&g_c, resume) == 1;
++        }
++    } else if (!strcmp(argv[2], "aot"))
+         ok = test->body(&g_c) == RECOMP_RETURN_NORMAL;
+     else if (!strcmp(argv[2], "interp"))
+         ok = (interrupt ? interp_bridge_run_interrupt(&g_c, test->pc)
+@@ -91,11 +163,20 @@
+     cpu_mirrors_to_p(&g_c);
+     printf("{\"ok\":%d,\"a\":%u,\"x\":%u,\"y\":%u,\"s\":%u,"
+            "\"p\":%u,\"d\":%u,\"db\":%u,\"m\":%u,\"xf\":%u,"
+-           "\"cpu_cycles\":%llu,\"master_cycles\":%llu,\"writes\":[",
++           "\"cpu_cycles\":%llu,\"master_cycles\":%llu",
+            ok, g_c.A, g_c.X, g_c.Y, g_c.S, g_c.P, g_c.D, g_c.DB,
+            g_c.m_flag, g_c.x_flag,
+            (unsigned long long)g_c.cycles,
+            (unsigned long long)g_c.master_cycles);
++    if (test->instruction_timing) printf(
++           ",\"resume\":%u,\"nmi\":%d,\"scope_depth\":%d,\"scope_underflow\":%d,"
++           "\"refresh_count\":%u,\"sync_count\":%u,\"last_sync\":%llu,"
++           "\"event_apu_catchup\":%.17g",
++           interp_bridge_lle_resume_pc(), g_test_snes.nmiPending,
++           g_push_depth, g_pop_underflow, refresh_count, sync_count,
++           (unsigned long long)last_sync,
++           event_entry ? g_snes->apuCatchupCycles : 0.0);
++    printf(",\"writes\":[");
+     for (unsigned i = 0; i < write_count; ++i)
+         printf("%s{\"address\":%u,\"value\":%u,\"master\":%llu}",
+                i ? "," : "", writes[i].address, writes[i].value,
+diff --git a/tests/timing/run.py b/tests/timing/run.py
+--- a/tests/timing/run.py
++++ b/tests/timing/run.py
+@@ -76,10 +76,20 @@
+                                                 start=target & 0xFFFF,
+                                                 entry_m=m, entry_x=xf))
+         name = f"timing_case_{i}_M{case.get('m', 1)}X{case.get('xf', 0)}"
+-        bodies.append(emit_function(bytes(rom), bank=pc >> 16,
+-                                    start=pc & 0xFFFF,
+-                                    entry_m=case.get("m", 1), entry_x=case.get("xf", 0),
+-                                    func_name=f"timing_case_{i}"))
++        saved_instruction_timing = os.environ.get("SNESRECOMP_EMIT_INSTRUCTION_TIMING")
++        if case.get("instruction_timing"):
++            os.environ["SNESRECOMP_EMIT_INSTRUCTION_TIMING"] = (
++                f"{pc:06X}:{case.get('m', 1)}:{case.get('xf', 0)}")
++        try:
++            bodies.append(emit_function(bytes(rom), bank=pc >> 16,
++                                        start=pc & 0xFFFF,
++                                        entry_m=case.get("m", 1), entry_x=case.get("xf", 0),
++                                        func_name=f"timing_case_{i}"))
++        finally:
++            if saved_instruction_timing is None:
++                os.environ.pop("SNESRECOMP_EMIT_INSTRUCTION_TIMING", None)
++            else:
++                os.environ["SNESRECOMP_EMIT_INSTRUCTION_TIMING"] = saved_instruction_timing
+         bodies.append(f"static const uint8_t code_{i}[] = {{" +
+                       ",".join(str(x) for x in code) + "};")
+         memory = case.get("memory", {})
+@@ -89,13 +99,15 @@
+         table.append(f"{{code_{i}, sizeof(code_{i}), {pc}, "
+                      f"{case.get('m', 1)}, {case.get('xf', 0)}, {case.get('db', 0)}, "
+                      f"{case.get('x', 0)}, {case.get('y', 0)}, {case.get('d', 0)}, "
+-                     f"{case.get('memsel', 0)}, init_{i}, {len(memory)}, {name}" + "}")
++                     f"{case.get('memsel', 0)}, init_{i}, {len(memory)}, {name}, "
++                     f"{int(bool(case.get('instruction_timing')))}" + "}")
+     header = """typedef struct TimingInit { uint32 address; uint8 value; } TimingInit;
+ typedef struct TimingCase {
+     const uint8_t *code; int size; uint32 pc;
+     uint8 m, xf, db; uint16 x, y, d; uint8 memsel;
+     const TimingInit *init; unsigned init_count;
+     RecompReturn (*body)(CpuState *);
++    int instruction_timing;
+ } TimingCase;
+ """
+     (out / "timing_cases.inc").write_text(
+diff --git a/tests/timing/test_instruction_timing.py b/tests/timing/test_instruction_timing.py
+new file mode 100644
+--- /dev/null
++++ b/tests/timing/test_instruction_timing.py
+@@ -0,0 +1,116 @@
++"""Native leaf write timestamps and real interpreter/AOT scheduler exits."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++from unittest.mock import patch
++
++import run as timing
++from test_bus_clocks import memory_cases, indexed_write_cases, boundary_cases
++from v2 import bus_timing
++
++
++class InstructionTiming(unittest.TestCase):
++    def test_leaf_writes_and_events(self):
++        cases = [c for c in timing.CASES if "branch" not in c["name"]]
++        cases += [c for c in memory_cases() if c['name'].split('-')[0] in
++                  ('dp', 'dpx', 'abs', 'absx', 'absy', 'long', 'longx')]
++        cases += [c for c in indexed_write_cases() if c['code'][0] in (0x9D, 0x99, 0x9E)]
++        cases += boundary_cases()
++        for xf in (0, 1):
++            for load, store in ((0xA2, 0x8E), (0xA0, 0x8C)):
++                cases.append(dict(name=f"index-register-{load:02X}-X{xf}", xf=xf,
++                                  code=[load, 0x34] + ([0x12] if not xf else []) +
++                                  [store, 0x20, 0x10, 0x6B],
++                                  cpu=14-2*xf, master=108-16*xf))
++        cases += [dict(c, name=c['name']+'-rts', code=c['code'][:-1]+[0x60],
++                       master=c['master']-2) for c in cases[:9]]
++        cases.append(dict(name="memsel-during-leaf", pc=0x808000,
++                          code=[0xA9, 1, 0x8D, 0x0D, 0x42, 0xEA,
++                                0xA9, 0x55, 0x8D, 0, 0x10, 0x6B],
++                          cpu=20, master=138))
++        cases.append(dict(name="enable-nmi", code=[0xA9, 0x81, 0x8D, 0, 0x42, 0x6B],
++                          cpu=12, master=90))
++        for c in cases:
++            c["instruction_timing"] = True
++        with tempfile.TemporaryDirectory(prefix="snes-leaf-timing-") as temp, patch.dict(
++                os.environ, {k: v for k, v in os.environ.items()
++                             if not k.startswith("SNESRECOMP_")}, clear=True):
++            os.environ["SNESRECOMP_EMIT_BUS_TIMING"] = "1"
++            os.environ["SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"] = "1"
++            out = Path(temp)
++            binary = timing.build(out, os.environ.get("CC", "cc"), cases)
++            def run(index, tier, *args):
++                p = subprocess.run([str(binary), str(index), tier, *args], cwd=out,
++                                   text=True, capture_output=True, timeout=10)
++                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
++                return json.loads(p.stdout)
++            for i, c in enumerate(cases):
++                with self.subTest(case=c["name"]):
++                    a, b = run(i, "interp"), run(i, "aot")
++                    self.assertEqual(a["cpu_cycles"], c["cpu"])
++                    self.assertEqual(a["master_cycles"], c["master"])
++                    self.assertEqual(a, b)
++                    self.assertEqual(b["scope_underflow"], 0)
++                    self.assertEqual(b["scope_depth"], 0)
++            # JSL: seven 8-clock accesses plus one 6-clock internal cycle.
++            # LDA ends at 78, STA ends at 108, and RTL ends at 152.
++            leaf = next(i for i, c in enumerate(cases) if c['name'] == 'mmio_store')
++            events = 0
++            for deadline in (1, 61, 62, 63, 77, 78, 79, 107, 108, 109, 151, 152, 153):
++                for resume in ((), ("resume",)):
++                    a = run(leaf, "event-interp", str(deadline), *resume)
++                    b = run(leaf, "event-aot", str(deadline), *resume)
++                    self.assertEqual(a, b, (deadline, resume, a, b))
++                    self.assertEqual(b['scope_depth'], 0)
++                    self.assertEqual(b['scope_underflow'], 0)
++                    if not resume and 62 < deadline <= 78:
++                        self.assertEqual(b['resume'], 0x8002)
++                        self.assertEqual(b['s'], 0x1FC)
++                    if not resume and 78 < deadline <= 108:
++                        self.assertEqual(b['resume'], 0x8005)
++                        self.assertEqual(b['s'], 0x1FC)
++                    events += 1
++            for resume in ((), ("resume",)):
++                a = run(len(cases)-1, "event-interp", "nmi", *resume)
++                b = run(len(cases)-1, "event-aot", "nmi", *resume)
++                self.assertEqual(a, b)
++                if not resume:
++                    self.assertEqual(b['resume'], 0x8005)
++                    self.assertEqual(b['nmi'], 1)
++                    self.assertEqual(b['s'], 0x1FC)
++                events += 1
++            for event in ("refresh", "beam-nmi"):
++                for resume in ((), ("resume",)):
++                    a = run(leaf, "event-interp", event, *resume)
++                    b = run(leaf, "event-aot", event, *resume)
++                    self.assertEqual(a, b, (event, resume, a, b))
++                    if not resume:
++                        self.assertEqual(b['resume'], 0x8005)
++                        self.assertEqual(b['master_cycles'], 148 if event == 'refresh' else 108)
++                        self.assertEqual(b['s'], 0x1FC)
++                    events += 1
++            print(f"Instruction timing: {len(cases)} exact leaf comparisons and {events} event/resume comparisons passed")
++
++    def test_selection_fails_closed(self):
++        with patch.dict(os.environ, {"SNESRECOMP_EMIT_BUS_TIMING": "1",
++                                    bus_timing.INSTRUCTION_ENV: "008000:1:0"}):
++            for code in ([0xD0, 1, 0xEA, 0x6B], [0x48, 0x68, 0x6B],
++                         [0xB1, 0x40, 0x6B], [0x40], [0xEE, 0, 0x10, 0x6B]):
++                with self.assertRaises(ValueError):
++                    timing.emit_function(bytes(code) + bytes(32768-len(code)),
++                                         bank=0, start=0x8000, entry_m=1, entry_x=0)
++            for bad in ("008000", "008000:2:0", "xyzxyz:1:0"):
++                os.environ[bus_timing.INSTRUCTION_ENV] = bad
++                with self.assertRaises(ValueError):
++                    bus_timing.instruction_targets()
++            os.environ[bus_timing.INSTRUCTION_ENV] = "008000:1:0"
++            os.environ["SNESRECOMP_EMIT_BUS_TIMING"] = ""
++            with self.assertRaises(ValueError):
++                bus_timing.instruction_targets()
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/v2/test_program_emit.py b/tests/v2/test_program_emit.py
+--- a/tests/v2/test_program_emit.py
++++ b/tests/v2/test_program_emit.py
+@@ -81,6 +81,32 @@
+     assert "unproven_callee_exit" in \
+         manifest["nodes"]["008000:M1X1"]["reasons"]
+     assert manifest["nodes"]["008010:M1X1"]["disposition"] == "lle_only"
++
++
++def test_instruction_timing_selection_invalidates_cache(tmp_path, monkeypatch):
++    rom, cfg, out = _fixture(tmp_path, target_opcode=0xEA)
++    monkeypatch.setenv('SNESRECOMP_EMIT_BUS_TIMING', '1')
++    monkeypatch.delenv('SNESRECOMP_EMIT_INSTRUCTION_TIMING', raising=False)
++    first = _run(rom, cfg, out)
++    assert first.returncode == 0, first.stdout + first.stderr
++    bank = out / 'bank00_v2.c'
++    original = bank.read_bytes()
++    monkeypatch.setenv('SNESRECOMP_EMIT_INSTRUCTION_TIMING', '008010:1:1')
++    selected = _run(rom, cfg, out)
++    assert selected.returncode == 0, selected.stdout + selected.stderr
++    assert b'CpuAotInstructionTiming _aot_timing;' in bank.read_bytes()
++    assert bank.read_bytes() != original
++    repeated = _run(rom, cfg, out)
++    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
++    assert 'reused verified published output' in repeated.stdout
++    monkeypatch.setenv('SNESRECOMP_EMIT_INSTRUCTION_TIMING', '008010:0:0')
++    other_width = _run(rom, cfg, out)
++    assert other_width.returncode == 0, other_width.stdout + other_width.stderr
++    assert bank.read_bytes() == original
++    monkeypatch.delenv('SNESRECOMP_EMIT_INSTRUCTION_TIMING')
++    restored = _run(rom, cfg, out)
++    assert restored.returncode == 0, restored.stdout + restored.stderr
++    assert bank.read_bytes() == original
+ 
+ 
+ def test_all_lle_host_alias_still_links_to_authoritative_dispatch(tmp_path):
+diff --git a/tools/v2_emit.py b/tools/v2_emit.py
+--- a/tools/v2_emit.py
++++ b/tools/v2_emit.py
+@@ -261,10 +261,12 @@
+             "SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"))
+         event_precision = event_precision_profile_digest()
+         bus_timing = bool(os.environ.get("SNESRECOMP_EMIT_BUS_TIMING"))
++        instruction_timing = os.environ.get("SNESRECOMP_EMIT_INSTRUCTION_TIMING", "")
+         return hashlib.sha256(
+             (f"{tree_digest}\0aot_deny_gate={int(deny_gate)}"
+              f"\0event_crossing_audit={int(event_audit)}"
+              f"\0bus_timing={int(bus_timing)}"
++             f"\0instruction_timing={instruction_timing}"
+              f"\0event_precision={event_precision}").encode()
+         ).hexdigest()
+ 

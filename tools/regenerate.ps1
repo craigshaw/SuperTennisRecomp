@@ -2,7 +2,8 @@
 param(
     [Parameter(Position = 0)]
     [string]$RomPath = $env:SUPER_TENNIS_ROM,
-    [string]$Python
+    [string]$Python,
+    [switch]$SkipGenerate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,14 +12,16 @@ Set-StrictMode -Version 2.0
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $ExpectedSha256 = '6e45a80ea148654514cb4e8604a0ffcbc726946e70f9e0b9860e36c0f3fa4877'
 
-if ([string]::IsNullOrWhiteSpace($RomPath)) {
+if (-not $SkipGenerate -and [string]::IsNullOrWhiteSpace($RomPath)) {
     throw 'Usage: tools\regenerate.ps1 -RomPath "C:\path\to\Super Tennis (USA).sfc"'
 }
-if (-not (Test-Path -LiteralPath $RomPath -PathType Leaf)) {
+if (-not $SkipGenerate -and -not (Test-Path -LiteralPath $RomPath -PathType Leaf)) {
     throw "ROM not found: $RomPath"
 }
 
-$RomPath = (Resolve-Path -LiteralPath $RomPath).Path
+if (-not $SkipGenerate) {
+    $RomPath = (Resolve-Path -LiteralPath $RomPath).Path
+}
 $Config = Join-Path $Root 'config\bank00.cfg'
 $Emitter = Join-Path $Root 'snesrecomp\tools\v2_emit.py'
 if (-not (Test-Path $Config -PathType Leaf)) {
@@ -28,9 +31,11 @@ if (-not (Test-Path $Emitter -PathType Leaf)) {
     throw 'Missing patched snesrecomp dependency. Initialize the submodules first.'
 }
 
-$actualSha256 = (Get-FileHash -LiteralPath $RomPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($actualSha256 -ne $ExpectedSha256) {
-    throw "Unsupported ROM SHA-256: $actualSha256`nExpected: $ExpectedSha256"
+if (-not $SkipGenerate) {
+    $actualSha256 = (Get-FileHash -LiteralPath $RomPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualSha256 -ne $ExpectedSha256) {
+        throw "Unsupported ROM SHA-256: $actualSha256`nExpected: $ExpectedSha256"
+    }
 }
 
 $candidates = @()
@@ -108,14 +113,16 @@ if (-not $PythonExecutable) {
     throw 'Python 3.11 or newer is required. Install Python and retry.'
 }
 
-Write-Host "Generating with Python $versionText"
+Write-Host "Using Python $versionText"
 
-& $PythonExecutable @PythonPrefix $Emitter `
-    --rom $RomPath `
-    --cfg-dir (Join-Path $Root 'config') `
-    --out-dir (Join-Path $Root 'generated') `
-    --source-root (Join-Path $Root 'src') `
-    --analysis-backend python
+& $PythonExecutable @PythonPrefix (Join-Path $Root 'tools\apply-snesrecomp-patches.py')
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+if ($SkipGenerate) {
+    return
+}
+& $PythonExecutable @PythonPrefix (Join-Path $Root 'tools\generate-normal.py') $RomPath
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

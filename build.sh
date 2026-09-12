@@ -13,6 +13,7 @@ if [ ! -f "$ROOT/generated/dispatch_v2.c" ]; then
   printf '%s\n' 'Missing generated code. Run tools/regenerate.sh first.' >&2
   exit 1
 fi
+python3 "$ROOT/tools/apply-snesrecomp-patches.py" --check
 cmake -S "$ROOT" -B "$ROOT/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build "$ROOT/build" --config Release --parallel
 printf '

@@ -11,7 +11,6 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PatchedSnesrecompRevision = '3678d0a6d7036217f26e32f6b9087d2933783690'
 $Preset = 'windows-msvc-x64-release'
 
 function Invoke-External {
@@ -105,16 +104,9 @@ if (-not (Test-Path $RunnerCmake -PathType Leaf) -or
     throw 'Required submodules are missing. Run git submodule update --init --recursive.'
 }
 
-$snesrecompRevision = (& $Git.Source -C (Join-Path $Root 'snesrecomp') rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $snesrecompRevision -ne $PatchedSnesrecompRevision) {
-    throw "Unexpected snesrecomp revision: $snesrecompRevision`nExpected: $PatchedSnesrecompRevision"
-}
-
-if (-not $SkipGenerate) {
-    & (Join-Path $Root 'tools\regenerate.ps1') -RomPath $RomPath
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
+& (Join-Path $Root 'tools\regenerate.ps1') -RomPath $RomPath -SkipGenerate:$SkipGenerate
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
 }
 if (-not (Test-Path (Join-Path $Root 'generated\dispatch_v2.c') -PathType Leaf)) {
     throw 'Missing generated code. Supply -RomPath or regenerate before using -SkipGenerate.'

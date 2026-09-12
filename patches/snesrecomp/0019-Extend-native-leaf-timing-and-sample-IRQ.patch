@@ -1,0 +1,534 @@
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -27,20 +27,33 @@
+     return frozenset(result)
+ 
+ 
+-def validate_instruction_leaf(block_pairs):
+-    """Fail closed until calls, branches and stack transforms are supported."""
+-    from snes65816 import IMP, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X, DP, DP_X, DP_Y
+-    if len(block_pairs) != 1:
+-        raise ValueError("instruction timing requires a single straight-line leaf block")
+-    pairs = next(iter(block_pairs.values()))
+-    if not pairs or pairs[-1][0].mnem not in ("RTS", "RTL"):
+-        raise ValueError("instruction timing requires a final RTS or RTL")
+-    for insn, _ in pairs[:-1]:
+-        if (insn.mnem not in ("NOP", "LDA", "LDX", "LDY", "STA", "STX", "STY", "STZ")
+-                or insn.mode not in (IMP, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X,
+-                                     DP, DP_X, DP_Y)):
+-            raise ValueError(f"instruction timing does not yet support {insn.mnem} at {insn.addr:06X}")
+-    return pairs
++def validate_instruction_leaf(block_pairs, cfg):
++    """Accept native leaves with local control flow and tested arithmetic."""
++    from snes65816 import (IMP, ACC, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X,
++                          DP, DP_X, DP_Y, REL, REL16)
++    data_modes = (IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X, DP, DP_X, DP_Y)
++    branches = ("BEQ", "BNE", "BCC", "BCS", "BMI", "BPL", "BVC", "BVS", "BRA", "BRL")
++    returns = 0
++    for key, pairs in block_pairs.items():
++        if not pairs:
++            raise ValueError("instruction timing requires nonempty blocks")
++        successors = cfg.blocks[key].successors
++        if any(s not in block_pairs for s in successors):
++            raise ValueError("instruction timing requires local branch targets")
++        if not successors and pairs[-1][0].mnem not in ("RTS", "RTL"):
++            raise ValueError("instruction timing requires a final RTS or RTL")
++        for insn, _ in pairs:
++            supported = (
++                (insn.mnem in ("RTS", "RTL", "NOP") and insn.mode == IMP)
++                or (insn.mnem in ("LDA", "LDX", "LDY", "STA", "STX", "STY", "STZ",
++                                  "CMP", "ADC") and insn.mode in data_modes)
++                or (insn.mnem == "ASL" and insn.mode == ACC)
++                or (insn.mnem in branches and insn.mode in (REL, REL16)))
++            if not supported:
++                raise ValueError(f"instruction timing does not yet support {insn.mnem} at {insn.addr:06X}")
++            returns += insn.mnem in ("RTS", "RTL")
++    if not returns:
++        raise ValueError("instruction timing requires a reachable RTS or RTL")
+ 
+ 
+ class BusTimingLines(list):
+@@ -78,7 +91,7 @@
+     def instruction(self, insn, cycles):
+         self.pc = insn.addr & 0xFFFFFF
+         self.extend([
+-            "if (interp_bridge_lle_master_deadline_reached(cpu)) {",
++            "if (interp_bridge_lle_instruction_boundary_reached(cpu)) {",
+             f"  return interp_bridge_lle_yield_unwind(cpu, 0x{self.pc:06X}u);",
+             "}",
+             "cpu->coprocessor_master_cycles = cpu->master_cycles;",
+diff --git a/runner/src/snes/aot_bus_timing.h b/runner/src/snes/aot_bus_timing.h
+--- a/runner/src/snes/aot_bus_timing.h
++++ b/runner/src/snes/aot_bus_timing.h
+@@ -52,7 +52,7 @@
+     cpu_write16(cpu, bank, addr, value);
+ }
+ 
+-/* Opt-in straight-line leaf timing. Like interp_bridge_runOpcode, callbacks
++/* Opt-in native leaf instruction timing. Like interp_bridge_runOpcode, callbacks
+  * observe the start of the instruction. This is not physical bus-edge timing.
+  * Keep pending costs local so no future clock is visible to an MMIO callback. */
+ typedef struct CpuAotInstructionTiming {
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -147,12 +147,14 @@
+ original generated code. This permits a one-body comparison against the
+ interpreter without also changing the timing of existing AOT coverage.
+ 
+-This bounded implementation accepts a single straight-line block ending in
+-RTS or RTL. Its preceding instructions can be NOP, LDA/LDX/LDY,
+-STA/STX/STY/STZ with immediate, direct-page, absolute or long addressing,
+-including their supported indexed forms. Unsupported selected bodies fail
+-generation. Emulation-mode invocations use the interpreter. Calls, branches,
+-stack manipulation, indirect addressing, RMW, RTI and block moves are outside
++This bounded implementation accepts native leaf routines with local branches
++and RTS/RTL returns. Supported data instructions are NOP, LDA/LDX/LDY,
++STA/STX/STY/STZ, CMP and ADC with immediate, direct-page, absolute or long
++addressing, including their supported indexed forms. Accumulator ASL, the
++eight conditional branches, BRA and BRL are also accepted. Every branch must
++stay inside the selected function. Unsupported selected bodies fail
++generation. Emulation-mode invocations use the interpreter. Calls, external
++branches, stack manipulation, indirect addressing, RMW, RTI and block moves are outside
+ this instruction-timing experiment.
+ 
+ Each instruction accumulates costs locally while callbacks observe the
+@@ -160,18 +162,21 @@
+ reads finish before committing the return instruction. A shared bridge
+ completion function advances CPU/master clocks, refresh accounting, beam and
+ coprocessors, and the existing APU accumulator. Each next instruction checks
+-the scheduler deadline and pending NMI before doing any work. An unwind
++the scheduler deadline, pending NMI and unmasked CPU/coprocessor IRQ before
++doing any work. Returns check again after popping the guest frame, so an IRQ
++raised during RTS/RTL resumes at the caller before it executes another opcode. An unwind
+ retains the exact next PC and live guest stack for interpreter resumption.
+ 
+ ```sh
+ python3 tests/timing/test_instruction_timing.py
+ ```
+ 
+-This test runs 143 complete leaf comparisons, including write timestamps and
+-byte order, and 32 real bridge scheduler exit/resume comparisons in each of
++This test runs 145 complete leaf comparisons, including write timestamps and
++byte order, and 82 real bridge scheduler exit/resume comparisons in each of
+ two modes: with and without the global bus option. It covers
+ exact deadline boundaries, delayed-enable NMI, a simulated refresh delay and
+-a simulated beam-triggered NMI. The event fixture also compares APU time
++a simulated beam-triggered NMI, and masked/unmasked IRQ at call, instruction
++and return boundaries. The event fixture also compares APU time
+ accumulation. These peripheral hooks are test doubles, not hardware models.
+ The shared C suite includes this test and checks that older timing modes
+ keep their existing results.
+@@ -180,3 +185,16 @@
+ general MMIO equivalence. APU-port handshakes, DMA, real peripheral timing,
+ optimised calls and other control paths still need title-level validation.
+ No new generation option is enabled by default.
++
++
++The local-branch and arithmetic extension is checked by:
++
++```sh
++python3 tests/timing/test_branch_instruction_timing.py
++```
++
++In each option mode it checks 565 complete executions and 572 scheduler
++exit/resume cases. Coverage includes all conditional branches, coincident
++branch/fall-through targets, native forward/backward page crossing, folded branches, BRA/BRL,
++8/16-bit arithmetic, carry and decimal status, and the accepted memory read
++addressing forms. This suite is also included in `tests/run_c_tests.sh`.
+diff --git a/tests/timing/fixture.c b/tests/timing/fixture.c
+--- a/tests/timing/fixture.c
++++ b/tests/timing/fixture.c
+@@ -28,7 +28,7 @@
+ static int recording;
+ static uint32 event_entry;
+ static RecompReturn (*event_body)(CpuState *);
+-static uint64_t refresh_at, beam_nmi_at, last_sync;
++static uint64_t refresh_at, beam_nmi_at, beam_irq_at, last_sync;
+ static unsigned refresh_count, sync_count;
+ 
+ void snes_refresh_charge(void) {
+@@ -41,6 +41,10 @@
+ void snes_sync_master_clock(Snes *snes, uint64_t master) {
+     sync_count++;
+     last_sync = master;
++    if (beam_irq_at && master >= beam_irq_at) {
++        snes->inIrq = true;
++        beam_irq_at = 0;
++    }
+     if (beam_nmi_at && master >= beam_nmi_at) {
+         snes->nmiPending = true;
+         beam_nmi_at = 0;
+@@ -101,7 +105,8 @@
+     g_c.D = test->d;
+     g_memsel = test->memsel;
+     g_c.PB = (uint8)(test->pc >> 16);
+-    cpu_mirrors_to_p(&g_c);
++    g_c.P = (uint8)((test->status & ~0x30u) | (test->m << 5) | (test->xf << 4));
++    cpu_p_to_mirrors(&g_c);
+     load(test->pc, test->code, test->size);
+     for (unsigned i = 0; i < test->init_count; ++i)
+         RAM[test->init[i].address] = test->init[i].value;
+@@ -141,6 +146,8 @@
+         } else if (!strcmp(argv[3], "refresh")) {
+             refresh_at = 90;
+             interp_bridge_set_master_deadline(120);
++        } else if (!strncmp(argv[3], "irq:", 4)) {
++            beam_irq_at = strtoull(argv[3]+4, NULL, 10);
+         } else if (!strcmp(argv[3], "beam-nmi")) {
+             beam_nmi_at = 90;
+         } else {
+@@ -151,6 +158,7 @@
+             const uint32 resume = interp_bridge_lle_resume_pc();
+             interp_bridge_set_master_deadline(1000);
+             g_test_snes.nmiPending = false;
++            g_test_snes.inIrq = false;
+             ok = ok && interp_bridge_run_until_quiescent(&g_c, resume) == 1;
+         }
+     } else if (!strcmp(argv[2], "aot"))
+@@ -176,6 +184,8 @@
+            g_push_depth, g_pop_underflow, refresh_count, sync_count,
+            (unsigned long long)last_sync,
+            event_entry ? g_snes->apuCatchupCycles : 0.0);
++    if (test->instruction_timing) printf(",\"irq\":%d", g_test_snes.inIrq);
++    if (test->instruction_timing && event_entry) printf(",\"pb\":%u", g_c.PB);
+     printf(",\"writes\":[");
+     for (unsigned i = 0; i < write_count; ++i)
+         printf("%s{\"address\":%u,\"value\":%u,\"master\":%llu}",
+diff --git a/tests/timing/run.py b/tests/timing/run.py
+--- a/tests/timing/run.py
++++ b/tests/timing/run.py
+@@ -100,7 +100,7 @@
+                      f"{case.get('m', 1)}, {case.get('xf', 0)}, {case.get('db', 0)}, "
+                      f"{case.get('x', 0)}, {case.get('y', 0)}, {case.get('d', 0)}, "
+                      f"{case.get('memsel', 0)}, init_{i}, {len(memory)}, {name}, "
+-                     f"{int(bool(case.get('instruction_timing')))}" + "}")
++                     f"{int(bool(case.get('instruction_timing')))}, {case.get('status', 4)}" + "}")
+     header = """typedef struct TimingInit { uint32 address; uint8 value; } TimingInit;
+ typedef struct TimingCase {
+     const uint8_t *code; int size; uint32 pc;
+@@ -108,6 +108,7 @@
+     const TimingInit *init; unsigned init_count;
+     RecompReturn (*body)(CpuState *);
+     int instruction_timing;
++    uint8 status;
+ } TimingCase;
+ """
+     (out / "timing_cases.inc").write_text(
+diff --git a/tests/timing/test_branch_instruction_timing.py b/tests/timing/test_branch_instruction_timing.py
+new file mode 100644
+--- /dev/null
++++ b/tests/timing/test_branch_instruction_timing.py
+@@ -0,0 +1,115 @@
++"""Selected local branches and arithmetic match real interpreter execution."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++from unittest.mock import patch
++
++import run as timing
++from test_branch_cycles import branch_cases
++from test_bus_clocks import memory_cases
++
++
++def cases():
++    result = branch_cases()
++    for opcode, flag, sense in ((0x10, 0x80, 0), (0x30, 0x80, 1),
++                                (0x50, 0x40, 0), (0x70, 0x40, 1),
++                                (0x90, 0x01, 0), (0xB0, 0x01, 1),
++                                (0xD0, 0x02, 0), (0xF0, 0x02, 1)):
++        for bit in (0, 1):
++            for fast in (0, 1):
++                for displacement in (0, 2):
++                    taken = bit == sense
++                    load = bool(displacement and not taken)
++                    speed = 6 if fast else 8
++                    result.append(dict(
++                        name=f"dynamic-{opcode:02X}-{bit}-{fast}-{displacement}",
++                        code=[opcode, displacement] + ([0xA9, 0x55] if displacement else []) + [0x6B],
++                        pc=0x8080FC if fast else 0x0080FC, memsel=fast,
++                        status=4 | (flag if bit else 0),
++                        cpu=8+int(taken)+2*load,
++                        master=3*speed+36+6*taken+2*speed*load))
++    for opcode in (0x80, 0x82):
++        for fast in (0, 1):
++            speed = 6 if fast else 8
++            result.append(dict(name=f"unconditional-{opcode:02X}-{fast}",
++                               code=[opcode, 2] + ([0] if opcode == 0x82 else []) +
++                                    [0xA9, 0x55, 0x6B],
++                               pc=0x8080FC if fast else 0x0080FC, memsel=fast,
++                               cpu=9 if opcode == 0x80 else 10,
++                               master=(3 if opcode == 0x80 else 4)*speed+42))
++    for m in (0, 1):
++        for decimal in (0, 1):
++            for carry in (0, 1):
++                for lhs, rhs in ((0, 0), (1, 1), (0x49, 0x51), (0x99, 1),
++                                 (0x7F, 1), (0xFF, 1), (0x9999, 1), (0x7FFF, 1)):
++                    mask = 255 if m else 65535
++                    operand = lambda op, value: [op, value & 255] + ([value >> 8 & 255] if not m else [])
++                    code = operand(0xA9, lhs) + operand(0x69, rhs) + operand(0xC9, mask) + [0x0A, 0x8D, 0, 0x10, 0x6B]
++                    result.append(dict(name=f"arithmetic-{m}-{decimal}-{carry}-{lhs}-{rhs}",
++                                       code=code, m=m, status=4 | decimal*8 | carry,
++                                       cpu=22-4*m, master=170-32*m))
++    result.append(dict(name="backward-native-page-cross", pc=0x0080FC,
++                       code=[0xAD, 0, 0x10, 0x69, 1, 0xC9, 3, 0x8D, 0, 0x10,
++                             0xD0, 0xF4, 0x6B], status=0, cpu=50, master=392))
++    # Reuse known read budgets across all accepted memory addressing forms.
++    for c in memory_cases():
++        if '-read-' not in c['name'] or c['name'].split('-')[0] not in ('dp', 'dpx', 'abs', 'absx', 'absy', 'long', 'longx'):
++            continue
++        for opcode_base in (0x60, 0xC0):  # ADC and CMP share LDA addressing offsets.
++            code = list(c['code'])
++            code[0] = (code[0] & 0x1F) | opcode_base
++            for status in (4, 5, 12, 13):
++                result.append(dict(c, name=f"read-{opcode_base:02X}-{status}-"+c['name'],
++                                   code=code, status=status))
++    for c in result:
++        c['instruction_timing'] = True
++    return result
++
++
++class BranchInstructionTiming(unittest.TestCase):
++    def test_branches_arithmetic_and_scheduler_exits(self):
++        self.check_branches_arithmetic_and_scheduler_exits(False)
++
++    def test_branches_arithmetic_with_global_bus(self):
++        self.check_branches_arithmetic_and_scheduler_exits(True)
++
++    def check_branches_arithmetic_and_scheduler_exits(self, global_bus):
++        with tempfile.TemporaryDirectory(prefix="snes-branch-instruction-") as temp, patch.dict(
++                os.environ, {k: v for k, v in os.environ.items()
++                             if not k.startswith("SNESRECOMP_")}, clear=True):
++            os.environ["SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"] = "1"
++            if global_bus:
++                os.environ["SNESRECOMP_EMIT_BUS_TIMING"] = "1"
++            out = Path(temp)
++            tests = cases()
++            binary = timing.build(out, os.environ.get('CC', 'cc'), tests)
++            def run(i, tier, *args):
++                p = subprocess.run([str(binary), str(i), tier, *args], cwd=out,
++                                   text=True, capture_output=True, timeout=10)
++                self.assertEqual(p.returncode, 0, p.stdout+p.stderr)
++                return json.loads(p.stdout)
++            events = 0
++            for i, c in enumerate(tests):
++                with self.subTest(case=c['name']):
++                    a, b = run(i, 'interp'), run(i, 'aot')
++                    self.assertEqual(a['cpu_cycles'], c['cpu'])
++                    if 'master' in c:
++                        self.assertEqual(a['master_cycles'], c['master'])
++                    self.assertEqual(a, b)
++                # Cross a taken/untaken branch, page boundary, folded branch,
++                # or ALU flag change, then resume from the precise guest PC.
++                if i in (0, 4, 96, 97, 104, 105, 112, 113, 160, 162, 164, 180, 228):
++                    for deadline in range(62, 210, 7):
++                        for resume in ((), ('resume',)):
++                            with self.subTest(case=c['name'], deadline=deadline, resume=resume):
++                                self.assertEqual(run(i, 'event-interp', str(deadline), *resume),
++                                                 run(i, 'event-aot', str(deadline), *resume))
++                            events += 1
++            print(f"Branch instruction timing: {len(tests)} complete comparisons and {events} scheduler comparisons passed")
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/timing/test_instruction_timing.py b/tests/timing/test_instruction_timing.py
+--- a/tests/timing/test_instruction_timing.py
++++ b/tests/timing/test_instruction_timing.py
+@@ -37,6 +37,10 @@
+                           code=[0xA9, 1, 0x8D, 0x0D, 0x42, 0xEA,
+                                 0xA9, 0x55, 0x8D, 0, 0x10, 0x6B],
+                           cpu=20, master=138))
++        cases.append(dict(name="irq-mmio", code=[0xA9, 0x55, 0x8D, 0, 0x42, 0x6B],
++                          status=0, cpu=12, master=90))
++        cases.append(dict(name="fast-irq-mmio", code=[0xA9, 0x55, 0x8D, 0, 0x42, 0x6B],
++                          pc=0x808000, memsel=1, status=0, cpu=12, master=78))
+         cases.append(dict(name="enable-nmi", code=[0xA9, 0x81, 0x8D, 0, 0x42, 0x6B],
+                           cpu=12, master=90))
+         for c in cases:
+@@ -99,12 +103,39 @@
+                         self.assertEqual(b['master_cycles'], 148 if event == 'refresh' else 108)
+                         self.assertEqual(b['s'], 0x1FC)
+                     events += 1
++            irq_leaf = next(i for i, c in enumerate(cases) if c['name'] == 'irq-mmio')
++            for selected in (leaf, irq_leaf):  # I set versus I clear.
++                for clock in (1, 61, 62, 63, 78, 79, 108, 109, 152):
++                    for resume in ((), ("resume",)):
++                        a = run(selected, "event-interp", f"irq:{clock}", *resume)
++                        b = run(selected, "event-aot", f"irq:{clock}", *resume)
++                        self.assertEqual(a, b, (selected, clock, resume, a, b))
++                        if selected == irq_leaf and not resume:
++                            self.assertEqual(b['irq'], 1)
++                            if 78 < clock <= 108:
++                                self.assertEqual(b['resume'], 0x8005)
++                                self.assertEqual(b['s'], 0x1FC)
++                            if 108 < clock <= 152:
++                                self.assertEqual(b['resume'], 0x7004)
++                                self.assertEqual(b['s'], 0x1FF)
++                        events += 1
++            fast_irq = next(i for i, c in enumerate(cases) if c['name'] == 'fast-irq-mmio')
++            for clock in (62, 63, 74, 75, 98, 99, 140):
++                for resume in ((), ("resume",)):
++                    a = run(fast_irq, "event-interp", f"irq:{clock}", *resume)
++                    b = run(fast_irq, "event-aot", f"irq:{clock}", *resume)
++                    self.assertEqual(a, b, (clock, resume, a, b))
++                    if not resume and clock > 98:
++                        self.assertEqual(b['resume'], 0x7004)
++                        self.assertEqual(b['pb'], 0)
++                        self.assertEqual(b['s'], 0x1FF)
++                    events += 1
+             print(f"Instruction timing: {len(cases)} exact leaf comparisons and {events} event/resume comparisons passed")
+ 
+     def test_selection_fails_closed(self):
+         with patch.dict(os.environ, {"SNESRECOMP_EMIT_BUS_TIMING": "1",
+                                     bus_timing.INSTRUCTION_ENV: "008000:1:0"}):
+-            for code in ([0xD0, 1, 0xEA, 0x6B], [0x48, 0x68, 0x6B],
++            for code in ([0x22, 0x10, 0x80, 0, 0x6B], [0x48, 0x68, 0x6B],
+                          [0xB1, 0x40, 0x6B], [0x40], [0xEE, 0, 0x10, 0x6B]):
+                 with self.assertRaises(ValueError):
+                     timing.emit_function(bytes(code) + bytes(32768-len(code)),
+diff --git a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+--- a/recompiler/v2/codegen.py
++++ b/recompiler/v2/codegen.py
+@@ -2389,6 +2389,10 @@
+     lines.extend([
+         "  uint32 _rpc = (uint32)((((_rpch << 8) | _rpcl) + 1) & 0xFFFFu);",
+         "  uint32 _rpc24 = ((uint32)_rpb << 16) | _rpc;",
++        *(["  if (interp_bridge_lle_instruction_boundary_reached(cpu)) {",
++           "    cpu->PB = _rpb;",
++           "    return interp_bridge_lle_yield_unwind(cpu, _rpc24);",
++           "  }"] if instruction_commit else []),
+         # task #7 RTS-decision trace (debug builds only). Records the exact
+         # host-return-vs-dispatch-vs-miss classification at this RTS/RTL,
+         # PC-range-filtered + tripwire-frozen in the recorder. Placed after
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -845,7 +845,7 @@
+     instruction_timing = (
+         (bank << 16 | start, entry_m, entry_x) in bus_timing.instruction_targets())
+     if instruction_timing:
+-        bus_timing.validate_instruction_leaf(block_per_insn_ir)
++        bus_timing.validate_instruction_leaf(block_per_insn_ir, cfg)
+ 
+     # ── Non-local-return idiom detection ────────────────────────────────
+     # A basic block is an NLR-block if its IR has the shape
+@@ -1571,14 +1571,20 @@
+                             f"if ({pred}) {{ "
+                             + (f"interp_bridge_event_audit_charge(cpu, "
+                                f"0x{branch_pc24:06X}u, {_blk_spd_expr}); "
+-                               if _event_audit else "")
++                               if _event_audit and not instruction_timing else "")
+                             + f"cpu->cycles += 1; "
+-                            f"cpu->master_cycles += {_blk_spd_expr}; {target_stmt} }}")
++                            f"cpu->master_cycles += {_blk_spd_expr}; "
++                            + (lines.commit() + " " if instruction_timing else "")
++                            + f"{target_stmt} }}")
+                     if fall is not None:
++                        if instruction_timing:
++                            lines.append(lines.commit())
+                         lines.append(_goto_or_return(fall, source_pc24=blk_pc24)
+                                      + " /* fall-through */")
+                         block_terminated = True
+                 elif isinstance(op, Goto):
++                    if instruction_timing:
++                        lines.append(lines.commit())
+                     # JML to a registered dispatch helper (ExecutePtr /
+                     # ExecutePtrLong). Bytes after the JML are a function-
+                     # pointer table; the decoder already read them into
+@@ -2002,7 +2008,8 @@
+                     # ReadReg, ALU, Read/Write, etc. — non-terminating.
+                     for ln in emit_op(op, getattr(di_insn, 'addr', None)):
+                         lines.append(ln)
+-            if instruction_timing and di_insn.mnem not in ('RTS', 'RTL'):
++            if instruction_timing and not any(
++                    isinstance(op, (Return, CondBranch, Goto)) for op in ir_ops):
+                 lines.append(lines.commit())
+         # NLR with no terminator IR (block IR was pure-PullReg, like
+         # $01:A3CB's [PLA, PLA, fall-through]). The SKIP setter wasn't
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -710,6 +710,17 @@
+                                       : INTERP_DEADLINE_EVENT_UNKNOWN;
+ }
+ 
++static int bridge_irq_pending(void) {
++    return g_snes &&
++        (g_snes->inIrq ||
++         (g_snes->cart && g_snes->cart->superfx &&
++          g_snes->cart->superfx->irq_pending) ||
++         (g_snes->cart && g_snes->cart->cx4 &&
++          cx4_irq_pending(g_snes->cart->cx4)) ||
++         (g_snes->cart && g_snes->cart->sa1 &&
++          sa1_cpu_irq_pending(g_snes->cart->sa1)));
++}
++
+ int interp_bridge_lle_master_deadline_reached(const CpuState *cpu) {
+     const int reached = cpu && s_lle_sched_depth > 0 &&
+         s_interp_bounce_owner_depth > 0 &&
+@@ -719,6 +730,16 @@
+     if (reached)
+         s_lle_next_unwind_is_deadline = 1;
+     return reached;
++}
++
++int interp_bridge_lle_instruction_boundary_reached(const CpuState *cpu) {
++    if (interp_bridge_lle_master_deadline_reached(cpu)) return 1;
++    if (cpu && s_lle_sched_depth > 0 && s_interp_bounce_owner_depth > 0 &&
++        !cpu->_flag_I && bridge_irq_pending()) {
++        s_lle_next_unwind_is_deadline = 1;
++        return 1;
++    }
++    return 0;
+ }
+ 
+ RecompReturn interp_bridge_lle_yield_unwind(CpuState *cpu, uint32 resume_pc24) {
+@@ -1081,17 +1102,7 @@
+             bridge_apu_flush(cpu);
+             return 1;
+         }
+-        if (auto_quiescent && steps && !in.i && g_snes &&
+-            (g_snes->inIrq ||
+-             (g_snes->cart && g_snes->cart->superfx &&
+-              g_snes->cart->superfx->irq_pending) ||
+-             /* The Cx4 asserts the CPU IRQ line when its program halts with
+-              * interrupts enabled ($7F51 bit 0 clear). Same shape as the GSU
+-              * line above; omitting it would starve the handler. */
+-             (g_snes->cart && g_snes->cart->cx4 &&
+-              cx4_irq_pending(g_snes->cart->cx4)) ||
+-             (g_snes->cart && g_snes->cart->sa1 &&
+-              sa1_cpu_irq_pending(g_snes->cart->sa1)))) {
++        if (auto_quiescent && steps && !in.i && bridge_irq_pending()) {
+             s_lle_resume_pc24=pc_before;
+             sync_interp_to_cpu(&in,cpu);
+             bridge_apu_flush(cpu);
+diff --git a/runner/src/snes/interp_bridge.h b/runner/src/snes/interp_bridge.h
+--- a/runner/src/snes/interp_bridge.h
++++ b/runner/src/snes/interp_bridge.h
+@@ -136,6 +136,10 @@
+  * is pending. Long, architecturally interruptible instructions use this at
+  * their legal byte boundaries before unwinding to the owning interpreter. */
+ int interp_bridge_lle_master_deadline_reached(const CpuState *cpu);
++
++/* Full instruction boundary for selected AOT bodies: also sample unmasked
++ * CPU and coprocessor IRQ lines, using the interpreter's pending-IRQ rule. */
++int interp_bridge_lle_instruction_boundary_reached(const CpuState *cpu);
+ 
+ /* Execute an architectural interrupt handler through its terminal RTI. The
+  * caller has already materialized the hardware interrupt frame, usually with
+diff --git a/tests/run_c_tests.sh b/tests/run_c_tests.sh
+--- a/tests/run_c_tests.sh
++++ b/tests/run_c_tests.sh
+@@ -92,6 +92,7 @@
+ echo "=== generated/interpreted final bus clocks ==="
+ python3 "$ROOT/tests/timing/test_bus_clocks.py"
+ python3 "$ROOT/tests/timing/test_instruction_timing.py"
++python3 "$ROOT/tests/timing/test_branch_instruction_timing.py"
+ 
+ echo "=== DSP-1 bus/core shell ==="
+ "$CC" -std=c11 -Wall -Wextra -Werror -O1 \

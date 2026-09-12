@@ -143,6 +143,11 @@ Run the desktop build with the launcher:
 ./build/super_tennis
 ```
 
+The public submodule pin includes the required runtime fixes. Setup verifies
+the committed source against the exported patch series. Normal regeneration
+uses the tracked cfg and generation policy; no gameplay profile is required.
+See [the patch guide](docs/SNESRECOMP_PATCHES.md) for verification and recovery.
+
 You can also pass the ROM directly:
 
 ```sh

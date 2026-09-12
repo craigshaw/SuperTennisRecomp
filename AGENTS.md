@@ -3,6 +3,11 @@
 Read `README.md`, `docs/ARCHITECTURE.md`, and `docs/SNESRECOMP_PATCHES.md`
 before changing the project.
 
+For tier-2 capture, AOT coverage experiments, or promotion into tracked cfg,
+also read [docs/AOT_COVERAGE.md](docs/AOT_COVERAGE.md). A private profile is a
+discovery input. Accepted coverage must be reproducible through the normal
+generation commands using tracked inputs and the contributor's verified ROM.
+
 ## Repository boundaries
 
 - This repository owns the Super Tennis host, frame scheduler, input harness,
@@ -31,7 +36,7 @@ The maintainer-approved README images at
 and `assets/screenshots/rally.png` are the only screenshot exceptions. Keep
 other captures private unless the maintainer explicitly approves them.
 
-`config/bank00.cfg` is the tracked analysis config and may contain
+The tracked `config/bankNN.cfg` files, currently `config/bank00.cfg`, may contain
 evidence-backed title facts with their rationale. The `generated/` tree remains
 a reproducible private product; do not weaken `.gitignore` to publish it.
 
@@ -40,14 +45,16 @@ a reproducible private product; do not weaken `.gitignore` to publish it.
 - Treat `(pc24, M, X)` as the minimum exact CPU execution key.
 - Prefer runtime observation over inferring width state from an address.
 - Distinguish an observed fact, a static deduction, and a hypothesis in notes.
-- Do not change `bank00.cfg` merely to silence analysis. Evidence-backed cfg
+- Do not change analysis cfg merely to silence analysis. Evidence-backed cfg
   changes should be proposed and validated through snesrecomp-lab.
 - Keep raw evidence immutable. Corrections belong in derived reports.
 
 ## Working loop
 
 1. Initialize and patch the submodule with
-   `sh tools/apply-snesrecomp-patches.sh`.
+   `sh tools/apply-snesrecomp-patches.sh`. The current public pin already
+   includes all required patches, so normal setup only verifies its files.
+   Older supported revisions can use the exported patches for recovery.
 2. Regenerate from the user's ROM with
    `sh tools/regenerate.sh /path/to/rom.sfc`.
 3. Build with `sh build.sh`.
@@ -64,3 +71,5 @@ a reproducible private product; do not weaken `.gitignore` to publish it.
 
 Before handing work on, run `sh tools/check-publication-boundary.sh`, the
 snesrecomp Python v2 suite, the shared C suite, and the relevant title replay.
+After changing patch application or generation glue, also run
+`python3 tools/test-build-workflow.py` and verify fresh normal generation.

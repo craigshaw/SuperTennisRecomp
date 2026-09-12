@@ -1,0 +1,277 @@
+diff --git a/recompiler/snes65816.py b/recompiler/snes65816.py
+index 7e2116d..bc0be88 100644
+--- a/recompiler/snes65816.py
++++ b/recompiler/snes65816.py
+@@ -172,7 +172,7 @@ class Insn:
+                   'dispatch_stack_pointer', 'dispatch_forced_m',
+                   'dispatch_forced_x', 'dispatch_consumed_stack_bytes',
+                   'dispatch_configured_stack_bytes',
+-                  'const_z_fold_unconditional', 'const_z_fold_dead_pc24',
++                  'const_z_fold_unconditional', 'const_z_fold_taken', 'const_z_fold_dead_pc24',
+                   'data_region_exec', 'terminal_jsr', 'noreturn_jsr',
+                   'return_trampoline', 'return_trampoline_pc',
+                   'long_call_trampoline_target', 'call_trampoline_setup')
+@@ -247,9 +247,10 @@ class Insn:
+         # Constant-Z branch fold: when set on a BEQ/BNE, the preceding
+         # same-block immediate-LD* made Z statically known and the
+         # branch was rewritten to an unconditional Goto with a single
+-        # live successor. dead_pc24 records the pruned edge for the
+-        # build report.
++        # live successor. taken preserves the hardware branch-cycle cost;
++        # dead_pc24 records the pruned edge for the build report.
+         self.const_z_fold_unconditional = False
++        self.const_z_fold_taken = False
+         self.const_z_fold_dead_pc24 = None
+         self.data_region_exec = False
+ 
+diff --git a/recompiler/v2/decoder.py b/recompiler/v2/decoder.py
+index 4c723c5..2d5ab2a 100644
+--- a/recompiler/v2/decoder.py
++++ b/recompiler/v2/decoder.py
+@@ -3498,6 +3498,9 @@ def _apply_constant_z_fold(graph: FunctionDecodeGraph) -> None:
+         # Rewrite successors to single live edge.
+         graph.insns[k] = DecodedInsn(key=k, insn=insn, successors=[live])
+         insn.const_z_fold_unconditional = True
++        # Lowering removes the flag test, but a taken hardware branch still
++        # costs its extra cycle. Preserve the original edge for emission.
++        insn.const_z_fold_taken = taken
+         insn.const_z_fold_dead_pc24 = dead.pc & 0xFFFFFF
+ 
+         # Build a context-rich record for the report.
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index 1a9a12a..47c4458 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -104,9 +104,10 @@ def _block_speed(bank: int, pc: int):
+ 
+ def _dynamic_charge_lines(insn, speed_expr: str = "8",
+                           audit_pc24: Optional[int] = None) -> List[str]:
+-    """Runtime-only per-instruction cycle charges (Axis-2 step C dynamics),
++    """Per-instruction cycle additions (Axis-2 step C dynamics),
+     emitted as conditional `cpu->cycles += 1;` statements just before the
+-    instruction's effect. Branch-taken is charged at the terminator instead.
++    instruction's effect. Unfolded branches charge at the terminator; a
++    folded taken branch retains its unconditional charge here.
+ 
+     Each +1 CPU-cycle charge also adds `speed_expr` master clocks (Axis-5), so
+     the master-clock accumulator stays region-weighted-consistent with `cycles`.
+@@ -127,6 +128,12 @@ def _dynamic_charge_lines(insn, speed_expr: str = "8",
+         f"interp_bridge_event_audit_charge(cpu, 0x{audit_pc24:06X}u, "
+         f"{speed_expr}); " if audit else ""
+     )
++    if getattr(insn, 'const_z_fold_taken', False):
++        # Constant-Z folding replaces CondBranch with Goto. Keep the same
++        # taken-edge charge, at the branch instruction, without a flag test.
++        out.append(
++            f"{audit_call}cpu->cycles += 1; "
++            f"cpu->master_cycles += {speed_expr};  /* folded taken branch */")
+     if 'dp' in charges:
+         out.append(
+             f"if (cpu->D & 0xFF) {{ {audit_call}cpu->cycles += 1; "
+diff --git a/tests/run_c_tests.sh b/tests/run_c_tests.sh
+index 470df86..8b9f7c5 100644
+--- a/tests/run_c_tests.sh
++++ b/tests/run_c_tests.sh
+@@ -86,6 +86,9 @@ echo "=== interpreter and bridge ==="
+     -lm -o "$OUT/bridge_test"
+ "$OUT/bridge_test"
+ 
++echo "=== generated/interpreted folded-branch CPU cycles ==="
++python3 "$ROOT/tests/timing/test_branch_cycles.py"
++
+ echo "=== DSP-1 bus/core shell ==="
+ "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+     -I "$ROOT/runner/src" -I "$ROOT/runner/src/snes" \
+diff --git a/tests/v2/test_emit_cycle_charge.py b/tests/v2/test_emit_cycle_charge.py
+index d52f050..582e569 100644
+--- a/tests/v2/test_emit_cycle_charge.py
++++ b/tests/v2/test_emit_cycle_charge.py
+@@ -85,6 +85,36 @@ def test_store_abs_x_has_no_page_cross_charge():
+     assert "page-cross" not in src, src
+ 
+ 
++def test_folded_branch_charges_only_the_taken_edge():
++    for branch in (0xD0, 0xF0):  # BNE, BEQ
++        for value in (0, 1):
++            rom = make_lorom_bank0({0x8000: bytes([
++                0xA9, value, branch, 0x01, 0xEA, 0x6B,
++            ])})
++            src = emit_function(rom, bank=0, start=0x8000, entry_m=1, entry_x=0)
++            taken = (value != 0) if branch == 0xD0 else (value == 0)
++            charge = "cpu->cycles += 1; cpu->master_cycles += 8;  /* folded taken branch */"
++            assert src.count(charge) == int(taken), src
++
++
++def test_folded_taken_branch_audit_uses_branch_pc():
++    rom = make_lorom_bank0({0x8000: bytes([0xA9, 1, 0xD0, 1, 0xEA, 0x6B])})
++    name = 'SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'
++    previous = os.environ.get(name)
++    try:
++        os.environ[name] = '1'
++        src = emit_function(rom, bank=0, start=0x8000, entry_m=1, entry_x=0)
++        assert (
++            "interp_bridge_event_audit_charge(cpu, 0x008002u, 8); "
++            "cpu->cycles += 1; cpu->master_cycles += 8;  /* folded taken branch */"
++        ) in src, src
++    finally:
++        if previous is None:
++            os.environ.pop(name, None)
++        else:
++            os.environ[name] = previous
++
++
+ def test_every_block_with_insns_is_charged():
+     # BCS fork -> three blocks (entry, fall-through, taken), each non-empty,
+     # so each must carry a cpu->cycles charge.
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -60,8 +60,23 @@
+ | Indexed WRAM read across page boundary; RTL | 11 | 82 |
+ 
+ The branch cases distinguish constant-Z folding from a runtime condition.
+-The folded taken branch currently loses its extra CPU cycle: AOT reports 10,
+-while the interpreter reports 11. The dynamic taken branch retains it.
++At the pinned integration revision, the folded taken branch loses its extra
++CPU cycle: AOT reports 10, while the interpreter reports 11. The dynamic
++taken branch retains it. The following branch-cycle fix restores the folded
++case to 11 CPU cycles; master-clock parity remains unresolved.
++
++Run the focused executable regression with:
++
++```sh
++python3 tests/timing/test_branch_cycles.py
++```
++
++It checks 96 combinations of LDA/LDX/LDY immediate, 8/16-bit load width,
++BEQ/BNE, taken/untaken, zero/nonzero displacement, and SlowROM/FastROM. Each
++tier must match the independently calculated CPU count and the other tier's
++checked architectural state. This test is included in `tests/run_c_tests.sh`,
++which therefore requires Python 3 as well as a C compiler. Passing this
++focused test does not imply that the full timing differential passes.
+ 
+ ## Scope
+ 
+diff --git a/tests/timing/fixture.c b/tests/timing/fixture.c
+--- a/tests/timing/fixture.c
++++ b/tests/timing/fixture.c
+@@ -54,7 +54,7 @@
+     init_cpu();
+     g_c.emulation = 0;
+     g_c.m_flag = test->m;
+-    g_c.x_flag = 0;
++    g_c.x_flag = test->xf;
+     g_c.DB = test->db;
+     g_c.X = test->x;
+     g_memsel = test->memsel;
+diff --git a/tests/timing/run.py b/tests/timing/run.py
+--- a/tests/timing/run.py
++++ b/tests/timing/run.py
+@@ -56,27 +56,29 @@
+ ]
+ 
+ 
+-def build(out: Path, cc: str) -> Path:
++def build(out: Path, cc: str, cases=None) -> Path:
++    if cases is None:
++        cases = CASES
+     bodies = []
+     table = []
+-    for i, case in enumerate(CASES):
++    for i, case in enumerate(cases):
+         pc = case.get("pc", 0x008000)
+         code = bytes(case["code"])
+         rom = bytearray(0x8000)
+         rom[pc & 0x7FFF:(pc & 0x7FFF) + len(code)] = code
+-        name = f"timing_case_{i}_M{case.get('m', 1)}X0"
++        name = f"timing_case_{i}_M{case.get('m', 1)}X{case.get('xf', 0)}"
+         bodies.append(emit_function(bytes(rom), bank=pc >> 16,
+                                     start=pc & 0xFFFF,
+-                                    entry_m=case.get("m", 1), entry_x=0,
++                                    entry_m=case.get("m", 1), entry_x=case.get("xf", 0),
+                                     func_name=f"timing_case_{i}"))
+         bodies.append(f"static const uint8_t code_{i}[] = {{" +
+                       ",".join(str(x) for x in code) + "};")
+         table.append(f"{{code_{i}, sizeof(code_{i}), {pc}, "
+-                     f"{case.get('m', 1)}, {case.get('db', 0)}, "
++                     f"{case.get('m', 1)}, {case.get('xf', 0)}, {case.get('db', 0)}, "
+                      f"{case.get('x', 0)}, {case.get('memsel', 0)}, {name}" + "}")
+     header = """typedef struct TimingCase {
+     const uint8_t *code; int size; uint32 pc;
+-    uint8 m, db; uint16 x; uint8 memsel;
++    uint8 m, xf, db; uint16 x; uint8 memsel;
+     RecompReturn (*body)(CpuState *);
+ } TimingCase;
+ """
+diff --git a/tests/timing/test_branch_cycles.py b/tests/timing/test_branch_cycles.py
+new file mode 100644
+--- /dev/null
++++ b/tests/timing/test_branch_cycles.py
+@@ -0,0 +1,67 @@
++"""Executable CPU-cycle regression for folded BEQ/BNE, separate from the
++known failing master-clock differential. Run directly with Python 3."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++
++import run as timing
++
++
++def branch_cases():
++    cases = []
++    for load in (0xA9, 0xA2, 0xA0):  # LDA, LDX, LDY immediate
++        for narrow in (0, 1):
++            for branch in (0xD0, 0xF0):  # BNE, BEQ
++                for nonzero in (False, True):
++                    value = (0x80 if narrow else 0x100) if nonzero else 0
++                    for offset in (0, 1):  # Include coincident target/fall-through.
++                        for fast in (0, 1):
++                            taken = nonzero if branch == 0xD0 else not nonzero
++                            code = [load, value & 255]
++                            if not narrow:
++                                code.append(value >> 8)
++                            code += [branch, offset] + ([0xEA] if offset else []) + [0x6B]
++                            cycles = (2 if narrow else 3) + 2 + int(taken) + 6
++                            if offset and not taken:
++                                cycles += 2  # NOP on the live fall-through.
++                            cases.append(dict(
++                                name=f"{load:02X}-{narrow}-{branch:02X}-{value:04X}-{offset}-{fast}",
++                                code=code, m=narrow if load == 0xA9 else 1,
++                                xf=narrow if load != 0xA9 else 0,
++                                pc=0x808000 if fast else 0x008000, memsel=fast,
++                                cpu=cycles))
++    return cases
++
++
++class FoldedBranchCycles(unittest.TestCase):
++    def test_generated_and_interpreted_cpu_cycles(self):
++        cases = branch_cases()
++        with tempfile.TemporaryDirectory(prefix="snesrecomp-branch-cycles-") as tmp:
++            out = Path(tmp)
++            binary = timing.build(out, os.environ.get("CC", "cc"), cases)
++            for index, case in enumerate(cases):
++                with self.subTest(case=case["name"]):
++                    pair = {}
++                    for tier in ("interp", "aot"):
++                        result = subprocess.run([str(binary), str(index), tier],
++                                                cwd=out, capture_output=True,
++                                                text=True, timeout=10)
++                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++                        pair[tier] = json.loads(result.stdout)
++                        self.assertEqual(pair[tier]["cpu_cycles"], case["cpu"], pair)
++                    # Removing clock fields leaves the architecture and writes.
++                    # Master-clock parity remains a separate, failing diagnostic.
++                    for state in pair.values():
++                        state.pop("cpu_cycles")
++                        state.pop("master_cycles")
++                    self.assertEqual(pair["interp"], pair["aot"])
++
++
++if __name__ == "__main__":
++    for key in tuple(os.environ):
++        if key.startswith("SNESRECOMP_"):
++            os.environ.pop(key)
++    unittest.main()

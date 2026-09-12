@@ -30,8 +30,7 @@ trap 'restore_normal_build' EXIT
 
 mkdir -p "$(dirname -- "$REPORT")"
 printf '%s\n' 'Generating the event-crossing audit build.'
-SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT=1 \
-  sh "$ROOT/tools/regenerate.sh" "$ROM"
+python3 "$ROOT/tools/generate-normal.py" "$ROM" --event-crossing-audit
 sh "$ROOT/build.sh"
 
 if [ "$#" -eq 1 ]; then

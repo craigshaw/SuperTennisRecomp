@@ -34,9 +34,4 @@ if [ "$actual_sha256" != "$EXPECTED_SHA256" ]; then
   exit 1
 fi
 
-python3 "$ROOT/snesrecomp/tools/v2_emit.py" \
-  --rom "$ROM" \
-  --cfg-dir "$ROOT/config" \
-  --out-dir "$ROOT/generated" \
-  --source-root "$ROOT/src" \
-  --analysis-backend python
+exec python3 "$ROOT/tools/generate-normal.py" "$ROM"

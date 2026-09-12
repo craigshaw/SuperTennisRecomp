@@ -1,0 +1,122 @@
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -24,8 +24,6 @@
+             raise ValueError(f"{INSTRUCTION_ENV}: invalid exact entry key {item!r}")
+         pc, m, x = item.split(":")
+         result.add((int(pc, 16), int(m), int(x)))
+-    if result and not enabled():
+-        raise ValueError(f"{INSTRUCTION_ENV} requires SNESRECOMP_EMIT_BUS_TIMING")
+     return frozenset(result)
+ 
+ 
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -1385,7 +1385,7 @@
+         # Axis-5: master-clocks-per-CPU-cycle for this block's code region, used
+         # to weight the dynamic (D.l/page-cross/branch-taken) master charges.
+         _blk_spd_expr, _blk_spd_const = _block_speed(bank, key.pc)
+-        if bus_timing.enabled():
++        if instruction_timing or bus_timing.enabled():
+             _blk_spd_expr, _blk_spd_const = "6", 6
+         _event_audit = bool(
+             os.environ.get('SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT'))
+@@ -2071,7 +2071,7 @@
+ 
+     # Compose the function source with labels per block.
+     src: List[str] = []
+-    if bus_timing.enabled():
++    if instruction_timing or bus_timing.enabled():
+         src.append('#include "snes/aot_bus_timing.h"')
+     src.append(f"RecompReturn {func_name}(CpuState *cpu) {{")
+     # Diagnostics — same call-stack plumbing v1 emitted, so the runtime
+diff --git a/tests/timing/test_instruction_timing.py b/tests/timing/test_instruction_timing.py
+--- a/tests/timing/test_instruction_timing.py
++++ b/tests/timing/test_instruction_timing.py
+@@ -14,6 +14,12 @@
+ 
+ class InstructionTiming(unittest.TestCase):
+     def test_leaf_writes_and_events(self):
++        self.check_leaf_writes_and_events(global_bus_timing=True)
++
++    def test_leaf_writes_and_events_without_global_bus_timing(self):
++        self.check_leaf_writes_and_events(global_bus_timing=False)
++
++    def check_leaf_writes_and_events(self, global_bus_timing):
+         cases = [c for c in timing.CASES if "branch" not in c["name"]]
+         cases += [c for c in memory_cases() if c['name'].split('-')[0] in
+                   ('dp', 'dpx', 'abs', 'absx', 'absy', 'long', 'longx')]
+@@ -38,7 +44,8 @@
+         with tempfile.TemporaryDirectory(prefix="snes-leaf-timing-") as temp, patch.dict(
+                 os.environ, {k: v for k, v in os.environ.items()
+                              if not k.startswith("SNESRECOMP_")}, clear=True):
+-            os.environ["SNESRECOMP_EMIT_BUS_TIMING"] = "1"
++            if global_bus_timing:
++                os.environ["SNESRECOMP_EMIT_BUS_TIMING"] = "1"
+             os.environ["SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"] = "1"
+             out = Path(temp)
+             binary = timing.build(out, os.environ.get("CC", "cc"), cases)
+@@ -108,8 +115,8 @@
+                     bus_timing.instruction_targets()
+             os.environ[bus_timing.INSTRUCTION_ENV] = "008000:1:0"
+             os.environ["SNESRECOMP_EMIT_BUS_TIMING"] = ""
+-            with self.assertRaises(ValueError):
+-                bus_timing.instruction_targets()
++            self.assertEqual(bus_timing.instruction_targets(),
++                             frozenset({(0x008000, 1, 0)}))
+ 
+ 
+ if __name__ == '__main__':
+diff --git a/tests/v2/test_program_emit.py b/tests/v2/test_program_emit.py
+--- a/tests/v2/test_program_emit.py
++++ b/tests/v2/test_program_emit.py
+@@ -84,8 +84,19 @@
+ 
+ 
+ def test_instruction_timing_selection_invalidates_cache(tmp_path, monkeypatch):
++    _check_instruction_timing_cache(tmp_path, monkeypatch, False)
++
++
++def test_instruction_timing_selection_with_global_bus_invalidates_cache(tmp_path, monkeypatch):
++    _check_instruction_timing_cache(tmp_path, monkeypatch, True)
++
++
++def _check_instruction_timing_cache(tmp_path, monkeypatch, global_bus_timing):
+     rom, cfg, out = _fixture(tmp_path, target_opcode=0xEA)
+-    monkeypatch.setenv('SNESRECOMP_EMIT_BUS_TIMING', '1')
++    if global_bus_timing:
++        monkeypatch.setenv('SNESRECOMP_EMIT_BUS_TIMING', '1')
++    else:
++        monkeypatch.delenv('SNESRECOMP_EMIT_BUS_TIMING', raising=False)
+     monkeypatch.delenv('SNESRECOMP_EMIT_INSTRUCTION_TIMING', raising=False)
+     first = _run(rom, cfg, out)
+     assert first.returncode == 0, first.stdout + first.stderr
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -141,9 +141,11 @@
+ ## Opt-in native leaf instruction timing
+ 
+ `SNESRECOMP_EMIT_INSTRUCTION_TIMING=008000:1:0,008100:0:1` selects exact
+-generated entry keys as `HEXPC:M:X`. It requires
+-`SNESRECOMP_EMIT_BUS_TIMING=1`. Both options participate in the output cache
+-key. Unselected bodies retain the previous bus-accounting mode.
++generated entry keys as `HEXPC:M:X`. It works independently of
++`SNESRECOMP_EMIT_BUS_TIMING`. Both options participate in the output cache
++key. With the global bus option absent, unselected bodies retain their
++original generated code. This permits a one-body comparison against the
++interpreter without also changing the timing of existing AOT coverage.
+ 
+ This bounded implementation accepts a single straight-line block ending in
+ RTS or RTL. Its preceding instructions can be NOP, LDA/LDX/LDY,
+@@ -166,7 +168,8 @@
+ ```
+ 
+ This test runs 143 complete leaf comparisons, including write timestamps and
+-byte order, and 32 real bridge scheduler exit/resume comparisons. It covers
++byte order, and 32 real bridge scheduler exit/resume comparisons in each of
++two modes: with and without the global bus option. It covers
+ exact deadline boundaries, delayed-enable NMI, a simulated refresh delay and
+ a simulated beam-triggered NMI. The event fixture also compares APU time
+ accumulation. These peripheral hooks are test doubles, not hardware models.

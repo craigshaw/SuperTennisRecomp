@@ -84,6 +84,11 @@ Whole-program analysis starts from reset and interrupt roots, emits exact
 variants where state is proven, and retains interpreter fallback for unresolved
 execution.
 
+The [AOT coverage workflow](AOT_COVERAGE.md) describes how private tier-2
+observations become validated, tracked analysis inputs. The acceptance gate
+includes fresh generation without a private profile, output comparison, and
+regression checks on that regenerated build.
+
 Generated C, manifests, ROMs, replays, diagnostic screenshots, traces,
 savestates, and raw comparison data are private artifacts. They are
 reproducible inputs or evidence, not source material for publication. The
