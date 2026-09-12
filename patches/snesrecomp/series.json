@@ -1,7 +1,7 @@
 {
   "base_revision": "a64932f1af958f7e71a728ac1235d6cf911f71a0",
-  "integrated_revision": "3a383fb8348140cd49371641e26086f81e1b2da3",
-  "integrated_patch_count": 19,
+  "integrated_revision": "1deba06c24336295a67bb95703a98bf3fcfd9766",
+  "integrated_patch_count": 20,
   "patches": [
     {
       "file": "0001-Recognize-direct-long-call-trampolines.patch",
@@ -78,6 +78,10 @@
     {
       "file": "0019-Extend-native-leaf-timing-and-sample-IRQ.patch",
       "sha256": "c509bf24934df6f91fe8648819fd76914115a8dd3f1acd9c4ecf896417771c03"
+    },
+    {
+      "file": "0020-Select-bus-clock-accounting-by-exact-entry.patch",
+      "sha256": "01d8065c1c400793495b70df9e43227a56e72a60c9ef0531fd4d340fe6aebb4b"
     }
   ],
   "patched_files": {
@@ -87,10 +91,10 @@
     "recompiler-rs/src/insn.rs": "14bc167f9bdb98d3d06810433129cdd4974a878476860052f5d57bad923b31da",
     "recompiler/snes65816.py": "bc1f68c1eee311e9871b70f86c024e6cf6733c6ac8dd8257fd9fd7a51948f79d",
     "recompiler/snes_cycles.py": "a44156357d7322b9928ca224e3e15da9950d27f7d934785de3f8a3ebed652d8b",
-    "recompiler/v2/bus_timing.py": "9112a11fa3000ca7e548127a1e7531adc876f9635f7c442a1e98d3c2546fcbef",
+    "recompiler/v2/bus_timing.py": "e60788faf01d0d624565aeef52bec4799db11bfc829a93e7efdad99ac1523946",
     "recompiler/v2/codegen.py": "1961321bbeec4a861ab8e4d76efb0479d383cc0fbc99d295e5e5fda24f137e27",
     "recompiler/v2/decoder.py": "680b901e9e9cd9eb630bf7f61bde7d9768379a524c3e786108e895906bfbaf7e",
-    "recompiler/v2/emit_function.py": "04bc6c97b42b5b9e3046d5f3f7f87d07509b9867e1b466a95c9d7eabd061038c",
+    "recompiler/v2/emit_function.py": "c8eee23485c689319081a771c34d7763e7d3ee52d2ff87da7b2344380c162ac6",
     "recompiler/v2/event_precision.py": "2a71585c31b61db28dac2879c647ab033a3bca4fd2eda215c2f6900a29bc4545",
     "recompiler/v2/program_analysis.py": "87a84f05444566651ef90783d58e356dc909651d8e053073087820ab9b1cb819",
     "runner/runner.cmake": "21e27ef03dc317a72f0a80c5077e371597fc7c21a4df62262dda2d0d2a1d6f78",
@@ -116,7 +120,7 @@
     "tests/run_c_tests.sh": "9cd77d7011b32a82ce6f4986513df7617c4cfe2db077326f8ada5527e2fe7aea",
     "tests/runtime_dispatch/rdnmi_open_bus_test.c": "a7d20fe93f3cce95cb37ab8f0ec2d0f779b029f2ef8f362b0849e9514dd93668",
     "tests/test_snes_cycles.py": "e992e134849775f4a9e2ac3683f47193621306fd96beb751f4a0b0d28bce23df",
-    "tests/timing/README.md": "0ecf269c298fd525788f6ff70ccf70c02a088655d39bb46bcd893d20af94fe1f",
+    "tests/timing/README.md": "8978d18c3a847ec1c7a1c35e28eb9b2ad5dfdebf04a5632282d48df615a1672b",
     "tests/timing/fixture.c": "b21584169c551e179f6fadd163099fb0097ed043b176c607a080f7865c57d63a",
     "tests/timing/run.py": "f9ae019ae52eacb7f41ac5291f1580e975b945c9092101e5d009324e4fb583a4",
     "tests/timing/test_branch_cycles.py": "32cf6258be03d9b5857669b229ad19de1f2ae2a84e705217e7c7e1b2ac908334",
@@ -129,12 +133,12 @@
     "tests/v2/test_codegen_per_op_smoke.py": "6a9704c0b138aa2fbd5491948f1615be861c883f46eddfbee66810370b49ac45",
     "tests/v2/test_direct_long_call_trampolines.py": "7c90c2af50d208a5b5aaf3aedb496d7412f53742db8b20580b339a7d5dd34f57",
     "tests/v2/test_dispatch_helper_entry_width.py": "ce60ee3b12c82a854e36af291bbd9ffd8ca5b356a74986e294fa65ff69f9f002",
-    "tests/v2/test_emit_cycle_charge.py": "3af46bd1aecf88a96e3d197d2c8fa057fa8450a80e9d13f4bbbb147754cd4848",
+    "tests/v2/test_emit_cycle_charge.py": "22e22815e1c3ff151bef42369bb068441f8c0d931d6914081107e5059e24422b",
     "tests/v2/test_hle_spc_upload_return_abi.py": "96525b17cbfdaa4913a2cc97ad7b19fdb6b0eeb2a8a974b162fced0cbe75db1e",
     "tests/v2/test_nlr_idiom.py": "fec37800004f4d65fa9a469e700a47d3c0dfe207c00582c1bcc9c3321e60f10f",
-    "tests/v2/test_program_emit.py": "3b63f512238102a42716a16d2a4517039a27b33df2f8c5de29d2b4e9c73c10c7",
+    "tests/v2/test_program_emit.py": "6fe193157ec6b7427ecc0b9dbd66027e10b7f65f22e223f23278ea5176e5c339",
     "tools/v2_analyze.py": "39d7e43996309abadb0d169982a8ee43303759a417a29f7f80339882140c6c0d",
-    "tools/v2_emit.py": "5a33ff5268da73c8608f21471ad7e5122547c06d5b15d61da740e1ad20e8b033",
+    "tools/v2_emit.py": "6962ec7cddb574e0f69d370df9323364a3a0cfdafdb68eb0d74f324f3782282f",
     "tools/v2_regen.py": "fe0b854356072344bf04d160e7764a778bc19fa7c3a8cfe8de94d9b9f02fa2be"
   },
   "previous_integrated_revision": "3678d0a6d7036217f26e32f6b9087d2933783690",

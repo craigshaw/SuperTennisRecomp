@@ -46,10 +46,11 @@ def verify(dependency, check_only=False):
                 or text_digest(dependency / name) != digest]
 
     missing = mismatches()
+    count = len(series["patches"])
     if not missing:
-        print("snesrecomp: all 19 patches verified.")
+        print(f"snesrecomp: all {count} patches verified.")
         return
-    if check_only or revision == series["integrated_revision"]:
+    if check_only or applied_counts[revision] == count:
         raise ValueError(
             "snesrecomp does not match the required patch series. "
             "Run tools/apply-snesrecomp-patches.sh (or the Python equivalent). "
@@ -68,8 +69,8 @@ def verify(dependency, check_only=False):
     missing = mismatches()
     if missing:
         raise ValueError("Patched source verification failed: " + missing[0])
-    print(f"snesrecomp: applied {len(series['patches']) - start} patches; "
-          "all 19 patches verified. The public submodule pin is unchanged.")
+    print(f"snesrecomp: applied {count - start} patches; "
+          f"all {count} patches verified. The public submodule pin is unchanged.")
 
 
 def main():

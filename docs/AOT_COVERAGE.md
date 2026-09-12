@@ -85,7 +85,64 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 190 variants
+## Accepted normal-build checkpoint: 191 variants
+
+The next accepted entry is `$01:9B33 M1X0`, observed as a call target in the
+original tier-2 match. It has one block, 26 instructions and no calls. Ordinary
+AOT completed the selected replay without bailouts but first diverged at frame
+1157. Five bounded call comparisons agreed on registers, flags, CPU cycles,
+multiplication outputs and WRAM. Master clocks and beam position differed.
+The ordinary body charged 648 master clocks instead of the bus model's 614,
+before refresh stalls. This identified a cost difference, without establishing
+that per-instruction scheduling was required.
+
+Selecting the existing bus-cost implementation for this entry, while retaining
+block timing, restored exact agreement on every recorded field across the
+2,125-frame replay. It removed 8,367 interpreter call gaps. The maintainer
+accepted the 191-body gameplay candidate; its capture exited normally with no
+bailouts or capture loss. Inputs were not recorded for that manual session.
+Temporary 40-clock refresh differences still occur within sampled calls and
+catch up outside the interval. Passing frame comparisons do not establish
+exact within-routine write/event timing or hardware multiplier latency.
+
+Tracked bank01 cfg now declares this exact entry, with no exit-width contract.
+Patch 0020 adds `SNESRECOMP_EMIT_BUS_TIMING_TARGETS`, and the shared normal
+generation helper selects `019B33:1:0`. Global bus timing stays disabled.
+The existing nineteen instruction-timed entries remain selected. No new CLC
+implementation, instruction-timing support, or runtime change was required.
+
+The private cfg proposal passed lab manifest validation and reproduced the
+accepted full manifest and all seven generated C files without a profile.
+Focused selector/cache checks, the 391-test Python v2 suite, the shared C suite
+and seven patch-setup checks passed at this integration milestone. Fresh normal
+generation reproduced that output and the desktop build succeeded. Its raw
+SHA-256 differs from the accepted private executable in exactly 48 bytes:
+the 16-byte Mach-O UUID and the corresponding 32-byte signature page hash.
+All other bytes and every generated archive member match. Both signatures
+verify, and every code-page signature hash was checked. This establishes the
+same executable code and data, so the accepted replay and gameplay results
+were reused. The publication check passed. Built on macOS Apple Silicon;
+Windows uses the same generation policy but was not executed.
+
+Patch 0020 is now published on the owner's snesrecomp integration branch at
+`1deba06c24336295a67bb95703a98bf3fcfd9766`. The title pin includes all twenty patches;
+normal setup verifies a clean dependency checkout. Publishing and repinning
+changed no tested generator or runtime source.
+
+Private evidence and promotion records are named by
+`captures/aot-019b33-block-current.txt` and
+`captures/aot-019b33-promotion-current.txt`.
+
+For the next candidate, first try ordinary AOT on a representative replay.
+If it differs, distinguish operation/state errors, incorrect clock costs and
+event-order differences using the earliest reproducible evidence. Test a
+bounded bus-cost correction when justified. Add instruction-timing opcode
+support only when the candidate's evidence requires that mode. A call-bearing
+body or an opcode outside the instruction-timing allowlist is not by itself
+proof that ordinary AOT cannot work. Use bounded Mesen evidence when the
+question needs an independent hardware observation.
+
+## Previous normal-build checkpoint: 190 variants
 
 The 12 September 2026 leaf batch adds seventeen exact call-entry variants to
 the previous 173-body build. They use the existing selected instruction-timing
@@ -121,7 +178,8 @@ Private evidence is under the directories named in
 `captures/aot-leaf-batch-current.txt` and
 `captures/aot-batch-promotion-current.txt`. This batch leaves 670 of the
 860 variants from the broad profile analysis outside the normal AOT set.
-The call-bearing candidates still need separate instruction-timing support.
+Call-bearing candidates need separate validation; some may need additional
+instruction-timing support if their observed behaviour requires that mode.
 
 ## Previous normal-build checkpoint: 173 variants
 
@@ -261,7 +319,7 @@ Once an experimental candidate set passes its behavioural checks:
    generated C, manifests, or private comparison reports.
 
 Both normal regeneration scripts now use the shared cfg-root and exact
-instruction-selection policy. Neither requires a profile. Extend the tracked
+timing-selection policy. Neither requires a profile. Extend the tracked
 selection only after applying the same acceptance gate to another candidate set.
 
 ## Final reproducibility and behaviour gate

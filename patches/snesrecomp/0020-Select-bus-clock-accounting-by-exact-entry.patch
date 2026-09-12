@@ -1,0 +1,199 @@
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+index 5eea7e0..a50355b 100644
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -6,10 +6,16 @@ host prologue inspection reads outside this transformation.
+ """
+ import os
+ import re
++from contextvars import ContextVar
++from functools import wraps
++
++
++BUS_TARGETS_ENV = "SNESRECOMP_EMIT_BUS_TIMING_TARGETS"
++_selected_bus_timing = ContextVar("selected_bus_timing", default=False)
+ 
+ 
+ def enabled():
+-    return bool(os.environ.get("SNESRECOMP_EMIT_BUS_TIMING"))
++    return bool(os.environ.get("SNESRECOMP_EMIT_BUS_TIMING")) or _selected_bus_timing.get()
+ 
+ 
+ INSTRUCTION_ENV = "SNESRECOMP_EMIT_INSTRUCTION_TIMING"
+@@ -17,16 +23,38 @@ INSTRUCTION_ENV = "SNESRECOMP_EMIT_INSTRUCTION_TIMING"
+ 
+ def instruction_targets():
+     """Explicit native leaf entry keys, written as HEXPC:M:X, comma separated."""
+-    value = os.environ.get(INSTRUCTION_ENV, "")
++    return _targets(INSTRUCTION_ENV)
++
++
++def bus_targets():
++    """Exact entries using bus costs with the existing block timing model."""
++    return _targets(BUS_TARGETS_ENV)
++
++
++def _targets(env_name):
++    value = os.environ.get(env_name, "")
+     result = set()
+     for item in value.split(",") if value else ():
+         if not re.fullmatch(r"[0-9A-Fa-f]{6}:[01]:[01]", item):
+-            raise ValueError(f"{INSTRUCTION_ENV}: invalid exact entry key {item!r}")
++            raise ValueError(f"{env_name}: invalid exact entry key {item!r}")
+         pc, m, x = item.split(":")
+         result.add((int(pc, 16), int(m), int(x)))
+     return frozenset(result)
+ 
+ 
++def scope_function(emitter):
++    """Keep the exact entry selection active through nested codegen helpers."""
++    @wraps(emitter)
++    def scoped(rom, bank, start, entry_m, entry_x, **kwargs):
++        key = (((bank & 0xFF) << 16) | (start & 0xFFFF), entry_m, entry_x)
++        token = _selected_bus_timing.set(key in bus_targets())
++        try:
++            return emitter(rom, bank, start, entry_m, entry_x, **kwargs)
++        finally:
++            _selected_bus_timing.reset(token)
++    return scoped
++
++
+ def validate_instruction_leaf(block_pairs, cfg):
+     """Accept native leaves with local control flow and tested arithmetic."""
+     from snes65816 import (IMP, ACC, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X,
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index 6be1fe7..2dd8cd9 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -475,6 +475,7 @@ def scan_rts_stack_deltas(
+     return next(iter(rts_deltas))
+ 
+ 
++@bus_timing.scope_function
+ def emit_function(rom: bytes, bank: int, start: int,
+                   entry_m: int, entry_x: int,
+                   *, end: Optional[int] = None,
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+index 013d7d9..8a3d795 100644
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -102,9 +102,14 @@ manual return-frame manipulation or validate all optimised call/dispatch
+ trampolines and omitted stack operations.
+ 
+ For actual generation, `SNESRECOMP_EMIT_BUS_TIMING=1` enables the experimental
+-path. The option participates in the generation-cache key, together with the
+-shared instruction/cycle model sources. With the option absent, generated
+-code retains block costs at code-region speed. The indexed-write cycle
++path globally. `SNESRECOMP_EMIT_BUS_TIMING_TARGETS=008000:1:0,018100:0:0`
++instead selects exact `(PC, M, X)` entries. This selection scopes the existing
++bus-cost implementation to each complete emitted function, including nested
++codegen helpers. It does not enable instruction timing. Entries selected by
++`SNESRECOMP_EMIT_INSTRUCTION_TIMING` still use that mode when both lists overlap.
++Malformed bus entry keys fail generation, and selection changes invalidate
++the generation cache. Unselected entries retain block costs at code-region
++speed when the global option is absent. The indexed-write cycle
+ corrections apply independently of this option in the generator/interpreter.
+ 
+ Enabled generation precharges six master clocks for each CPU cycle and adds
+diff --git a/tests/v2/test_emit_cycle_charge.py b/tests/v2/test_emit_cycle_charge.py
+index 05a4450..8eccd59 100644
+--- a/tests/v2/test_emit_cycle_charge.py
++++ b/tests/v2/test_emit_cycle_charge.py
+@@ -17,6 +17,38 @@ from v2.emit_function import emit_function  # noqa: E402
+ _STATIC_CHARGE = re.compile(r'^\s*cpu->cycles \+= (\d+);\s*$', re.M)
+ 
+ 
++def test_selected_bus_costs_match_global_and_do_not_leak():
++    # Indexed read, MMIO write and return cover nested codegen timing helpers.
++    rom = make_lorom_bank0({0x8000: bytes([0xBD, 0x34, 0x12, 0x8D, 0, 0x42, 0x6B])})
++    from v2 import bus_timing
++    with patch.dict(os.environ, {}, clear=True):
++        ordinary = emit_function(rom, 0, 0x8000, 1, 0)
++        os.environ[bus_timing.BUS_TARGETS_ENV] = '008000:1:0'
++        selected = emit_function(rom=rom, bank=0, start=0x8000, entry_m=1, entry_x=0)
++        assert not bus_timing.enabled()
++        assert selected != ordinary
++        assert 'CpuAotInstructionTiming _aot_timing;' not in selected
++        for key in ('008000:0:0', '008000:1:1', '018000:1:0', '008001:1:0'):
++            os.environ[bus_timing.BUS_TARGETS_ENV] = key
++            assert emit_function(rom, 0, 0x8000, 1, 0) == ordinary
++        os.environ['SNESRECOMP_EMIT_BUS_TIMING'] = '1'
++        assert emit_function(rom, 0, 0x8000, 1, 0) == selected
++
++
++def test_selected_bus_scope_is_restored_after_emission_error():
++    from v2 import bus_timing
++    rom = make_lorom_bank0({0x8000: bytes([0xEA, 0x6B])})
++    with patch.dict(os.environ, {bus_timing.BUS_TARGETS_ENV: '008000:1:0'}, clear=True):
++        with patch('v2.emit_function.decode_function', side_effect=RuntimeError('decode failed')):
++            try:
++                emit_function(rom, 0, 0x8000, 1, 0)
++            except RuntimeError as exc:
++                assert str(exc) == 'decode failed'
++            else:
++                assert False, 'expected decode error'
++        assert not bus_timing.enabled()
++
++
+ def test_linear_block_charges_static_cycles():
+     # LDA #$05 (2) ; STA $00 (dp, 3) ; RTS (6) -> one block, 11 static cycles
+     # (plus a runtime D.l!=0 dynamic charge for the dp store).
+diff --git a/tests/v2/test_program_emit.py b/tests/v2/test_program_emit.py
+index 3437be2..92c9c30 100644
+--- a/tests/v2/test_program_emit.py
++++ b/tests/v2/test_program_emit.py
+@@ -61,6 +61,35 @@ def test_bus_timing_option_invalidates_generation_cache(tmp_path, monkeypatch):
+     assert bank_path.read_bytes() == legacy
+ 
+ 
++def test_selected_bus_timing_invalidates_cache(tmp_path, monkeypatch):
++    rom, cfg, out = _fixture(tmp_path, target_opcode=0xEA)
++    env_name = 'SNESRECOMP_EMIT_BUS_TIMING_TARGETS'
++    monkeypatch.delenv('SNESRECOMP_EMIT_BUS_TIMING', raising=False)
++    monkeypatch.delenv(env_name, raising=False)
++    first = _run(rom, cfg, out)
++    assert first.returncode == 0, first.stdout + first.stderr
++    bank = out / 'bank00_v2.c'
++    ordinary = bank.read_bytes()
++    monkeypatch.setenv(env_name, '008010:1:1')
++    selected = _run(rom, cfg, out)
++    assert selected.returncode == 0, selected.stdout + selected.stderr
++    assert bank.read_bytes() != ordinary
++    assert b'cpu_aot_fetch_extra(cpu, 0x008010u' in bank.read_bytes()
++    assert b'cpu_aot_fetch_extra(cpu, 0x008000u' not in bank.read_bytes()
++    repeated = _run(rom, cfg, out)
++    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
++    assert 'reused verified published output' in repeated.stdout
++    monkeypatch.setenv(env_name, '008010:0:0')
++    other_width = _run(rom, cfg, out)
++    assert other_width.returncode == 0, other_width.stdout + other_width.stderr
++    assert bank.read_bytes() == ordinary
++    monkeypatch.setenv(env_name, '008010')
++    invalid = _run(rom, cfg, out)
++    assert invalid.returncode != 0
++    assert env_name + ': invalid exact entry key' in invalid.stderr
++    assert bank.read_bytes() == ordinary
++
++
+ def test_manifest_emitter_keeps_structural_target_as_lle(tmp_path):
+     rom_path, cfg_dir, out_dir = _fixture(tmp_path, target_opcode=0x00)
+     result = _run(rom_path, cfg_dir, out_dir)
+diff --git a/tools/v2_emit.py b/tools/v2_emit.py
+index 39f2dd7..3ae117c 100644
+--- a/tools/v2_emit.py
++++ b/tools/v2_emit.py
+@@ -261,11 +261,14 @@ def main() -> int:
+             "SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"))
+         event_precision = event_precision_profile_digest()
+         bus_timing = bool(os.environ.get("SNESRECOMP_EMIT_BUS_TIMING"))
++        from v2.bus_timing import bus_targets
++        selected_bus_timing = sorted(bus_targets())
+         instruction_timing = os.environ.get("SNESRECOMP_EMIT_INSTRUCTION_TIMING", "")
+         return hashlib.sha256(
+             (f"{tree_digest}\0aot_deny_gate={int(deny_gate)}"
+              f"\0event_crossing_audit={int(event_audit)}"
+              f"\0bus_timing={int(bus_timing)}"
++             f"\0selected_bus_timing={selected_bus_timing}"
+              f"\0instruction_timing={instruction_timing}"
+              f"\0event_precision={event_precision}").encode()
+         ).hexdigest()

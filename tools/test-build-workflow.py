@@ -33,11 +33,19 @@ class PatchSetupTests(unittest.TestCase):
         revision = SERIES["integrated_revision" if current else "previous_integrated_revision"]
         self.git("checkout", "--detach", revision)
 
-    def test_current_pin_needs_no_patch_application(self):
+    def test_current_pin_applies_only_pending_patches(self):
         self.checkout(current=True)
+        pending = len(SERIES["patches"]) - SERIES["integrated_patch_count"]
+        self.apply("--check", success=not pending)
+        result = self.apply()
+        if pending:
+            self.assertIn(f"applied {pending} patches", result.stdout)
+        before = self.git("diff", "--binary").stdout
         self.apply("--check")
         self.apply()
-        self.assertEqual(self.git("status", "--porcelain").stdout, "")
+        self.assertEqual(self.git("diff", "--binary").stdout, before)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout.strip(),
+                         SERIES["integrated_revision"])
 
     def apply(self, *args, success=True):
         result = subprocess.run(

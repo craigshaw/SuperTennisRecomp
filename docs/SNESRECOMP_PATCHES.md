@@ -5,12 +5,14 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to the published integration commit
-[`3a383fb8348140cd49371641e26086f81e1b2da3`](https://github.com/craigshaw/snesrecomp/commit/3a383fb8348140cd49371641e26086f81e1b2da3)
+[`1deba06c24336295a67bb95703a98bf3fcfd9766`](https://github.com/craigshaw/snesrecomp/commit/1deba06c24336295a67bb95703a98bf3fcfd9766)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains all nineteen patches listed below. Normal setup verifies the
-committed files and leaves the dependency working tree clean.
+It contains all twenty patches. Normal setup verifies the committed source
+and leaves the dependency working tree clean. Patch 0020 adds the exact-entry
+bus-cost selector to the previous nineteen-patch pin
+`3a383fb8348140cd49371641e26086f81e1b2da3`.
 
-The previous public pin was `3678d0a6d7036217f26e32f6b9087d2933783690`,
+The older recovery pin is `3678d0a6d7036217f26e32f6b9087d2933783690`,
 which contained the first twelve patches. The upstream base was
 `a64932f1af958f7e71a728ac1235d6cf911f71a0`. The exported series remains
 available to reconstruct the same source from either older revision.
@@ -45,6 +47,7 @@ it introduces no further runtime source changes.
 | `0017-Add-selected-native-leaf-instruction-timing.patch` | Add selected native leaf instruction timing with shared runtime completion. |
 | `0018-Decouple-selected-leaf-from-global-bus-timing.patch` | Allow selected leaf timing with global bus timing disabled. |
 | `0019-Extend-native-leaf-timing-and-sample-IRQ.patch` | Extend selected leaf timing to local branches and arithmetic; sample IRQ at instruction and return boundaries. |
+| `0020-Select-bus-clock-accounting-by-exact-entry.patch` | Scope existing bus-cost generation to exact entries, with cache invalidation and selection tests. |
 
 All patches contain game-neutral implementation or synthetic tests. ROMs,
 generated title code, profiles, recordings and private reports are excluded.
@@ -69,8 +72,8 @@ python tools/apply-snesrecomp-patches.py --check
 ```
 
 The tool verifies the current public pin without applying patches. It also
-accepts the previous public pin or upstream base for recovery, applying seven
-or nineteen patches respectively to a clean checkout. It verifies patch
+accepts the older recovery pin or upstream base, applying eight
+or twenty patches respectively to a clean checkout. It verifies patch
 SHA-256 values and the contents of all 55 affected files against
 [`series.json`](../patches/snesrecomp/series.json). Source-file comparisons
 normalise CRLF line endings for Windows; patch files retain their exact bytes.
@@ -92,8 +95,10 @@ The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
 and selects nineteen native leaves for instruction timing: the original
 `$00:C3DE M1X0` and `$00:C7A0 M1X0`, plus the seventeen-entry leaf batch.
-The normal output has 190 AOT bodies. No profile manifest is required. Global
-bus timing remains disabled, and inherited experimental settings are cleared.
+The normal output has 191 AOT bodies. The additional `$01:9B33 M1X0` entry
+uses `SNESRECOMP_EMIT_BUS_TIMING_TARGETS=019B33:1:0` for corrected bus costs
+while retaining block timing. No profile manifest is required. Global bus
+timing remains disabled, and inherited experimental settings are cleared.
 
 The shared helper keeps the existing event diagnostics available through
 explicit `--event-crossing-audit` and `--event-precision-profile` options.
@@ -112,6 +117,13 @@ addressing, stack manipulation, memory RMW, RTI and block moves remain outside
 this mode. Unsupported selections fail generation.
 
 ## Evidence and limits
+
+The 191-body candidate retains block timing for the added multiplication
+routine. Corrected bus costs restore exact agreement with the 190-body control
+across the selected 2,125-frame replay, removing 8,367 call gaps. The maintainer
+also accepted gameplay. Patch 0020 reproduces that existing bus-cost output
+without changing runtime code or adding instruction-timed opcode support.
+Temporary differences within calls remain, so this is bounded title evidence.
 
 The subsequent seventeen-entry batch uses this same pinned runtime and adds
 no patches. Two targeted replays match every recorded field across 6,625
@@ -173,7 +185,7 @@ setup, repeat setup, modified/partial refusal and CRLF checkout behaviour.
 
 ## Upstreaming
 
-All nineteen fixes are published on the project owner's integration branch
+All twenty patches are published on the project owner's integration branch
 and included in the title pin. The exported patches remain the recovery and
 review form until the required fixes are accepted upstream. For later updates:
 

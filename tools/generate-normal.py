@@ -37,6 +37,8 @@ def main():
         "01D0C1:1:0", "02B15C:1:0", "02B2C5:1:0", "02B4AB:0:0",
         "0381D8:1:0",
     ))
+    # This accepted entry needs corrected bus costs but retains block timing.
+    env["SNESRECOMP_EMIT_BUS_TIMING_TARGETS"] = "019B33:1:0"
     if args.event_crossing_audit:
         env["SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"] = "1"
     if args.event_precision_profile:
