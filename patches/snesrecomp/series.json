@@ -1,7 +1,7 @@
 {
   "base_revision": "a64932f1af958f7e71a728ac1235d6cf911f71a0",
-  "integrated_revision": "1deba06c24336295a67bb95703a98bf3fcfd9766",
-  "integrated_patch_count": 20,
+  "integrated_revision": "4b75abb736c27d2118531bc5f5500b610b6dc035",
+  "integrated_patch_count": 21,
   "patches": [
     {
       "file": "0001-Recognize-direct-long-call-trampolines.patch",
@@ -82,6 +82,10 @@
     {
       "file": "0020-Select-bus-clock-accounting-by-exact-entry.patch",
       "sha256": "01d8065c1c400793495b70df9e43227a56e72a60c9ef0531fd4d340fe6aebb4b"
+    },
+    {
+      "file": "0021-Preserve-timing-header-in-split-bank-sources.patch",
+      "sha256": "06dc84ebbd7ab516c689ba5e0c2a9ee171f6c8549b150e43f2a487466645c3aa"
     }
   ],
   "patched_files": {
@@ -139,7 +143,9 @@
     "tests/v2/test_program_emit.py": "6fe193157ec6b7427ecc0b9dbd66027e10b7f65f22e223f23278ea5176e5c339",
     "tools/v2_analyze.py": "39d7e43996309abadb0d169982a8ee43303759a417a29f7f80339882140c6c0d",
     "tools/v2_emit.py": "6962ec7cddb574e0f69d370df9323364a3a0cfdafdb68eb0d74f324f3782282f",
-    "tools/v2_regen.py": "fe0b854356072344bf04d160e7764a778bc19fa7c3a8cfe8de94d9b9f02fa2be"
+    "tools/v2_regen.py": "fe0b854356072344bf04d160e7764a778bc19fa7c3a8cfe8de94d9b9f02fa2be",
+    "recompiler/v2/translation_units.py": "da5f1096dd8d866fc014b7b280dab7f3dff6a06e4ccb92dc0db97e6c3f2738dc",
+    "tests/v2/test_translation_units.py": "0e5ad5f6e74d0735f1db79ae78b25b732adc6ed44dfef95afd8e382532bfb6b7"
   },
   "previous_integrated_revision": "3678d0a6d7036217f26e32f6b9087d2933783690",
   "previous_integrated_patch_count": 12

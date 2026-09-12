@@ -85,7 +85,16 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 191 variants
+## Accepted normal-build checkpoint: 309 variants
+
+The [bulk screening report](AOT_BATCH_SCREENING.md) records the accepted
+118-body addition. All five saved replays pass across 18,354 frames, and the
+maintainer accepted gameplay. Tracked cfg and timing policy reproduce the
+309-body candidate without a private profile. Use the bulk workflow for
+further screening rather than imposing a fixed small batch size or manually
+testing every routine.
+
+## Previous checkpoint: 191 variants
 
 The next accepted entry is `$01:9B33 M1X0`, observed as a call target in the
 original tier-2 match. It has one block, 26 instructions and no calls. Ordinary
@@ -125,7 +134,7 @@ were reused. The publication check passed. Built on macOS Apple Silicon;
 Windows uses the same generation policy but was not executed.
 
 Patch 0020 is now published on the owner's snesrecomp integration branch at
-`1deba06c24336295a67bb95703a98bf3fcfd9766`. The title pin includes all twenty patches;
+`1deba06c24336295a67bb95703a98bf3fcfd9766`. That title pin included all twenty patches;
 normal setup verifies a clean dependency checkout. Publishing and repinning
 changed no tested generator or runtime source.
 

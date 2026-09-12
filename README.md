@@ -144,7 +144,8 @@ Run the desktop build with the launcher:
 ```
 
 The public submodule pin includes the required runtime fixes and per-entry
-bus-cost selector. Setup verifies the source against the exported patch series.
+bus-cost selector and split-source timing-header fix. Setup verifies the
+source against the exported patch series.
 Normal regeneration uses the tracked cfg and generation policy; no gameplay
 profile is required.
 See [the patch guide](docs/SNESRECOMP_PATCHES.md) for verification and recovery.
