@@ -36,9 +36,11 @@ def main():
         "00DA64:1:0", "00DC7F:1:0", "01A40E:1:0", "01B506:1:0",
         "01D0C1:1:0", "02B15C:1:0", "02B2C5:1:0", "02B4AB:0:0",
         "0381D8:1:0",
+        "00B1F6:1:0", "00BD44:1:0", "00BE5F:1:0", "01E87F:1:0", "02906B:1:0",
+        "07CD2B:1:0", "01EDF2:1:0",
     ))
-    # Preserve the validated bulk selection, including 47 keys kept in LLE.
-    # Of 166 selected keys, 119 emit bodies. Global bus timing stays disabled.
+    # Preserve the validated bulk and recovery selections.
+    # Global bus timing stays disabled.
     # See docs/AOT_BATCH_SCREENING.md before changing selection or cfg exclusions.
     env["SNESRECOMP_EMIT_BUS_TIMING_TARGETS"] = ",".join((
         "019B33:1:0", "00B2C6:1:0", "00B2DC:1:0", "00B8D9:1:0", "00BF1C:1:0",
@@ -75,6 +77,7 @@ def main():
         "02ED7B:1:0", "038000:1:0", "03802A:1:0", "0380E1:1:0", "0380F2:1:0",
         "07CCCD:1:0", "07CDB1:1:0", "07D3A5:1:0", "07D3CD:1:0", "07D413:1:0",
         "07D510:1:0",
+        "019A8B:1:0", "019ACD:1:0", "02E98C:1:0", "02EC0B:1:0",
     ))
     if args.event_crossing_audit:
         env["SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"] = "1"

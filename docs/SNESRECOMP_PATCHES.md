@@ -4,10 +4,11 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 
 ## Public pin and recovery patches
 
-The submodule is pinned to the published integration commit
-[`4b75abb736c27d2118531bc5f5500b610b6dc035`](https://github.com/craigshaw/snesrecomp/commit/4b75abb736c27d2118531bc5f5500b610b6dc035)
+The submodule is pinned to integration commit
+[`60058e938908fbc62db07ddaf5fc435293d9bf9d`](https://github.com/craigshaw/snesrecomp/commit/60058e938908fbc62db07ddaf5fc435293d9bf9d)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0021. Patch 0021 preserves timing headers
+It contains patches 0001 through 0022. Patch 0022 extends selected native leaf
+instruction timing. Normal setup verifies the complete source. Patch 0021 preserves timing headers
 when large generated banks are split. Patch 0020 adds the exact-entry
 bus-cost selector to the previous nineteen-patch pin
 `3a383fb8348140cd49371641e26086f81e1b2da3`.
@@ -49,6 +50,12 @@ it introduces no further runtime source changes.
 | `0019-Extend-native-leaf-timing-and-sample-IRQ.patch` | Extend selected leaf timing to local branches and arithmetic; sample IRQ at instruction and return boundaries. |
 | `0020-Select-bus-clock-accounting-by-exact-entry.patch` | Scope existing bus-cost generation to exact entries, with cache invalidation and selection tests. |
 | `0021-Preserve-timing-header-in-split-bank-sources.patch` | Include the existing timing declarations in every generated bank shard. |
+| `0022-Extend-selected-leaf-status-and-ALU-timing.patch` | Add tested logical, accumulator, register and accumulator-width operations to selected leaf timing; keep index-width changes excluded. |
+
+Patch 0022 is included in the title pin and retained as an exported patch. It changes
+the generator's supported instruction selection and adds synthetic tests;
+unselected generated output stays unchanged. The recovery candidate and its
+current acceptance state are recorded in [AOT_RECOVERY.md](AOT_RECOVERY.md).
 
 All patches contain game-neutral implementation or synthetic tests. ROMs,
 generated title code, profiles, recordings and private reports are excluded.
@@ -72,10 +79,10 @@ python tools/apply-snesrecomp-patches.py
 python tools/apply-snesrecomp-patches.py --check
 ```
 
-The tool verifies the current public pin without changing source. It also
-accepts the older recovery pin or upstream base, applying nine
-or twenty-one patches respectively to a clean checkout. It verifies patch
-SHA-256 values and the contents of all 57 affected files against
+The tool verifies the complete source at the current pin. It also
+accepts the older recovery pin or upstream base, applying ten
+or twenty-two patches respectively to a clean checkout. It verifies patch
+SHA-256 values and the contents of all 58 affected files against
 [`series.json`](../patches/snesrecomp/series.json). Source-file comparisons
 normalise CRLF line endings for Windows; patch files retain their exact bytes.
 An already complete series is verified without writing. An incomplete series
@@ -94,12 +101,12 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
-and selects nineteen native leaves for instruction timing: the original
-`$00:C3DE M1X0` and `$00:C7A0 M1X0`, plus the seventeen-entry leaf batch.
-The normal output has 309 AOT bodies. The bus-cost selection contains 166
-exact keys, of which 119 emit bodies with corrected costs and block timing.
-The other 47 remain interpreted under the validated cfg exclusions and exit
-proofs. Preserve this selection with the cfg; see [the bulk screening report](AOT_BATCH_SCREENING.md).
+and selects 26 native leaves for instruction timing: the previous nineteen
+plus seven leaves validated in the recovery batch.
+The normal output has 329 AOT bodies. The bus-cost selection contains 170
+exact keys, of which 132 emit bodies with corrected costs and block timing.
+The other 38 remain interpreted under the validated cfg exclusions and exit
+proofs. Preserve this selection with the cfg; see [the recovery report](AOT_RECOVERY.md).
 No profile manifest is required. Global bus timing remains disabled, and
 inherited experimental settings are cleared.
 
@@ -188,8 +195,8 @@ setup, repeat setup, modified/partial refusal and CRLF checkout behaviour.
 
 ## Upstreaming
 
-Patches 0001 through 0021 are published on the project owner's integration
-branch and included in the title pin. The exported patches remain the recovery and
+Patches 0001 through 0022 are included in the title pin on the project owner's
+integration branch. The exported patches remain the recovery and
 review form until the required fixes are accepted upstream. For later updates:
 
 1. Rebase each logical change against the intended upstream revision.

@@ -1,9 +1,103 @@
 # Bulk AOT screening
 
-The accepted normal build has 309 AOT bodies, an increase of 118 from the
+The [13 September recovery report](AOT_RECOVERY.md) records the subsequent
+accepted 20-body addition, normal 329-body build and remaining classified work. Read that checkpoint
+before repeating the overnight investigations below.
+
+The previous accepted build had 309 AOT bodies, an increase of 118 from the
 191-body checkpoint. The maintainer accepted gameplay on 12 September 2026.
 Tracked cfg and generation policy reproduce the tested candidate without a
 private profile or runtime selection guards.
+
+## Overnight handoff: 12 September 2026
+
+The maintainer has paused work for the night. No experiment is running and no
+new gameplay session is needed to resume the saved investigations.
+
+- Accepted title commit: `bf05205` on `main`, published to
+  `craigshaw/SuperTennisRecomp`.
+- Dependency: `4b75abb736c27d2118531bc5f5500b610b6dc035` on
+  `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`. All 21 patches
+  are published and included in the title pin.
+- Normal desktop: `build/super_tennis`, 309 AOT variants. The 551 remaining
+  variants from the original 860-body profile output are not 551 established
+  bugs. They include unexercised candidates, unresolved analysis and failures.
+- The latest batch passed five saved replays, maintainer gameplay, fresh
+  generation equivalence and executable comparison. Reuse this evidence when
+  the relevant inputs and executable code are unchanged.
+
+### Recommended next batch
+
+Investigate the 40 additions in the surviving 158-entry guarded selection
+that did not appear among the 118 clean-generation additions. Derive the set
+from `bus/wide-clean-result.json` (`selected`) minus
+`handoff/generation.json` (`new`); selection uses addresses, so recover exact
+M/X from the saved generation options and manifest before editing cfg.
+
+These entries have passing execution evidence in the guarded screening build.
+That does not prove that their bodies can be enabled independently in normal
+generation. Excluding unvalidated callees retracted caller exit-width proofs.
+First map each missing body to its actual analysis rejection and required
+callees. Group shared dependencies and rank groups by observed execution and
+likely recovery value. The number recoverable without another runtime fix is
+still unknown; do not promise all 40 or invent exit-width contracts.
+
+Use the accepted 309-body build as the new control. Preserve its output and
+options before generating a separate private candidate. Re-establish the
+all-additions-disabled control if the profile roots or generated caller bodies
+change. Screen dependency groups with runtime selection, then validate the
+combined clean cfg candidate. Do not restart the original 669-entry screen
+or revert to a fixed four-routine batch size.
+
+The seven wider-replay exclusions and four frequent failing entries listed
+below remain separate investigations. A Windows build check is also outstanding
+for this batch. FZeroRecomp is reference material only; the maintainer explicitly
+prohibited changes there.
+
+### Lessons to preserve
+
+- Candidate count, executed AOT count, removed interpreter calls and measured
+  speed are different quantities. Report each accurately. A passing replay
+  with zero executions of an addition does not validate that addition.
+- Correct bus costs and instruction scheduling are separate choices. A
+  call-bearing routine or an unsupported instruction-timing opcode does not
+  establish a need for instruction timing. Diagnose the earliest state,
+  clock or event-order difference before extending the shared implementation.
+- Passing subsets can fail when combined. Test the merged selection and
+  retain the first failing evidence when excluding an interaction.
+- `force_lle` can change caller exit proofs. Named `func` boundaries for
+  interpreted tail targets can also be necessary. Removing these boundaries
+  caused an unresolved tail transfer at frame 1586 in an earlier proposal.
+- Keep generated code and screening instrumentation private. Final promotion
+  uses tracked cfg plus the shared generation helper, with no profile or deny
+  gates. `funcs.h` and generated C are not the place to publish discoveries.
+- Keep testing proportional: focused comparisons while iterating, wider
+  replays on a combined candidate, shared suites when shared source changes.
+  Do not rerun unchanged suites for documentation or publication alone.
+- Prefer raw executable hash equality. If it differs, do not assume harmless
+  metadata: verify the exact differing regions, every signature code-page
+  hash and whole-file equality outside those regions. The accepted comparison
+  here permits only the Mach-O UUID and its first-page signature hash.
+
+### Evidence lookup and scope
+
+Read `captures/aot-bulk-current.txt` and
+`captures/aot-bulk-promotion-current.txt` to locate the private workspaces.
+The bulk directory contains reusable `st-bulk-*.py` scripts. Inspect their
+paths, selected sets and baseline assumptions before running them; they were
+written for the previous 191-body control, not as general supported tools.
+
+Old private `handoff/summary.json` and session metadata describe the state at
+capture time and can still say "pending" or "normal build unchanged". Keep
+them immutable. This document and the published commits record final acceptance;
+the promotion directory records the later output and binary checks.
+
+The five replay comparisons use the accepted title build as their control.
+They are regression evidence, not five independent Mesen hardware comparisons.
+Use snesrecomp-lab for bounded independent observations when a specific
+unresolved question needs them. The raw recordings and local automation are
+not distributed with the source repository; another machine needs access to
+that private workspace to repeat this exact screen, but not to build the game.
 
 ## Current result
 

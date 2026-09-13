@@ -85,7 +85,15 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 309 variants
+## Accepted normal-build checkpoint: 329 variants
+
+The [13 September recovery report](AOT_RECOVERY.md) records 20 further adopted
+bodies, their exact execution evidence and the remaining classification. The
+combined clean selection passed a focused 4,816-frame replay. The maintainer
+waived manual gameplay and requested promotion. Fresh normal generation and
+the installed desktop code/data match the tested candidate.
+
+## Previous checkpoint: 309 variants
 
 The [bulk screening report](AOT_BATCH_SCREENING.md) records the accepted
 118-body addition. All five saved replays pass across 18,354 frames, and the

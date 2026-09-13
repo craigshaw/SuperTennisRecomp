@@ -7,6 +7,9 @@ For tier-2 capture, AOT coverage experiments, or promotion into tracked cfg,
 also read [docs/AOT_COVERAGE.md](docs/AOT_COVERAGE.md). A private profile is a
 discovery input. Accepted coverage must be reproducible through the normal
 generation commands using tracked inputs and the contributor's verified ROM.
+For the current checkpoint, next batch and efficient screening procedure, read
+[docs/AOT_BATCH_SCREENING.md](docs/AOT_BATCH_SCREENING.md). Start with its
+overnight handoff before repeating an experiment.
 
 ## Repository boundaries
 
@@ -36,7 +39,7 @@ The maintainer-approved README images at
 and `assets/screenshots/rally.png` are the only screenshot exceptions. Keep
 other captures private unless the maintainer explicitly approves them.
 
-The tracked `config/bankNN.cfg` files, currently `config/bank00.cfg`, may contain
+The tracked `config/bankNN.cfg` files may contain
 evidence-backed title facts with their rationale. The `generated/` tree remains
 a reproducible private product; do not weaken `.gitignore` to publish it.
 
@@ -52,8 +55,8 @@ a reproducible private product; do not weaken `.gitignore` to publish it.
 ## Working loop
 
 1. Initialize and patch the submodule with
-   `sh tools/apply-snesrecomp-patches.sh`. The current public pin already
-   includes all required patches, so normal setup only verifies its files.
+   `sh tools/apply-snesrecomp-patches.sh`. The current pin already
+   includes all 22 required patches, so normal setup only verifies its files.
    Older supported revisions can use the exported patches for recovery.
 2. Regenerate from the user's ROM with
    `sh tools/regenerate.sh /path/to/rom.sfc`.
