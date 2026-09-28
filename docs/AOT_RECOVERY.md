@@ -1,11 +1,109 @@
 # AOT recovery
 
-The accepted normal build now generates **339 AOT bodies**. The previous
-338-body checkpoint is title `886d884` with snesrecomp `4cf00bb`. This follow-up
-adds only `00C818:M1X0`, with no removals, and pins snesrecomp `42b0e44`.
+The accepted normal build generates **339 AOT bodies**, at title `39871de`
+with snesrecomp `42b0e44`. The latest work is a private cost profile, with no
+change to the accepted selection, runtime or generated output.
 This report supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: controller polling and byte stacks, 28 September 2026
+## Latest checkpoint: measured interpreter work, 28 September 2026
+
+### Measurement and validation
+
+One private runner profiled the saved 4,816-frame replay. It links the accepted
+normal generated library and runtime objects, replacing only the interpreter
+object with an instrumented private copy. Each completed opcode records its
+exact entry PC/M/X, instruction count and CPU cycles, plus a 600-frame window.
+M/X is sampled before execution. Interrupt service and parked idle time are
+excluded. These are guest CPU work counts, not master clocks or host CPU time.
+The instrumented run time is not a performance benchmark.
+
+The capture contains 14,932,604 interpreted instructions and 63,657,896 CPU
+cycles at 8,400 exact keys. Both totals equal the existing interpreter counters.
+There are no profile overflows or changing opcodes at a recorded key. All 4,816
+frame records are byte-identical to the accepted normal reference, with zero
+bailouts, tier-2 tuple overflow or journal failures.
+
+The normal Python cfg-root analyzer was run read-only. Its complete manifest
+equals the accepted manifest. Instruction membership comes from its decoded
+graphs, not nearest-address attribution. Shared graph regions are counted once
+within each group. Different groups can overlap. Unknown-exit continuations
+are absent from those graphs, so the two exit-proof group counts are lower
+bounds for their caller bodies, not complete savings estimates.
+
+### Ranked findings
+
+| Measured group | Interpreted instructions | Share of all interpreted instructions | Meaning |
+| --- | ---: | ---: | --- |
+| Already emitted `00CE3F`, `00CFE8`, `00D0DE`, `00D271`, `00D285`, `00D2A0` | 3,183,161 | 21.32% | A compiled body does not ensure that all its execution stays compiled; graph overlaps removed |
+| `01EBAE`, `01ECCB`, `01E5DF`, `01E72F`, all M1X0 entries | 2,486,791 | 16.65% | Four related interpreted routines, with saved timing failures and shared operation requirements |
+| Seven M1X0 instructions in the `008031` call loop | 2,441,221 | 16.35% | Calls and the loop transfer still execute in the interpreter |
+| Already emitted `07D8A5:M1X0` graph | 1,844,138 | 12.35% | Its generated scheduler guard can refuse compiled execution |
+| Four M1X0 instructions at `00899F` through `0089A6` | 588,032 | 3.94% | Observed NMI clear loop, active through the end of the replay |
+| Six callers blocked by `00EF63:M1X0`, proven prefixes only | 83,174 | 0.56% | Coverage opportunity; complete caller continuation cost is not measured by this subtotal |
+| Five callers blocked by `00C3B6:M1X0`, proven prefixes only | 67,340 | 0.45% | Same limitation; retain the saved callee failure |
+
+The six EF63 callers remain `02AEF7`, `02AF10`, `02B022`, `02B037`, `02B04C`
+and `02B066`. EF63 is already emitted but lacks a proven exit; its decoded
+tails include excluded `00F322`. The C3B6 group remains `02B0A8`, `00DBBD`,
+`00D94B`, `028821` and `00DB7E`. These dependencies are confirmed against the
+current normal analyzer, not only historical classification strings. Neither
+group is promised to become fully available from one exit fact. Any later
+exit declaration still requires the lab proposal and repeat-capture workflow,
+exact entry scope, and normal-analyzer validation.
+
+### Recommended next batch
+
+Start with `01EBAE:M1X0` and `01ECCB:M1X0`. Together their non-overlapping
+decoded bodies account for **1,432,697 instructions, or 9.59%** of this replay's
+interpreted instructions. Both have proven normal-analysis entries and exits
+and remain under `interpret_only`. Static inspection identifies shared missing
+selected instruction timing for SEC, SBC immediate/absolute, and direct-page
+byte INC/DEC. Their byte PHA/PLA support already exists. Inspect complete
+generation and stack joins before claiming that this operation list is enough.
+
+Use this bounded sequence:
+
+1. Implement and compare only the required shared instruction forms. Cover
+   arithmetic flags and widths, read-modify-write bus behavior, and event/resume
+   boundaries. Preserve the scoped MMIO-read behavior established by C818.
+2. Validate one clean two-routine candidate with the saved primary replay.
+   Reuse its accepted control and the old failures at frames 85 and 87. Confirm
+   actual compiled execution and reduced interpreter work. Keep their helper
+   `01EF24` interpreted unless a separate measured need appears.
+3. Measure a quiet rendered candidate/control comparison. These routines run
+   at frames 84 through 240 in the longer input, so a gain here would not prove
+   faster sustained match play. Do not translate the 9.59% work share into a
+   speed claim. Stop expansion if the candidate does not reduce useful work.
+4. Only after that result, assess `01E5DF` and `01E72F`. They add X0 PHX/PLX and
+   M0 accumulator ROR requirements. Their measured work occurs around frames
+   1350 through 1712. Retain the saved failures at primary frames 934 and 936;
+   these are different replay coordinates. Four additions are a possibility,
+   not an accepted batch size.
+
+Run the full shared suites once for a final shared-source change, then promote
+only executed, passing additions through fresh normal generation. This profiling
+task itself changed no shared source and required no compiler suite or new
+Mesen capture. Do not reopen the parked 804D prefix or remove scheduler guards
+on the strength of frequency alone. The larger already-emitted groups need a
+separate continuation/timing question, not additional body-count claims.
+
+### Evidence and limits
+
+Private evidence is under `captures/aot-cost-profile-20260928`, indexed by
+`captures/aot-cost-profile-current.txt`. Follow-up records in the stack and
+original recovery workspaces make it discoverable from
+`captures/aot-recovery-current.txt`. It includes the instrumentation, exact
+compile/link/run commands, raw tally, frame comparison, decoded membership,
+normal-analyzer comparison, target instruction forms and recommendation.
+
+The normal desktop and headless binary hashes remain unchanged. The original
+interpreter source remains identical to the profiled source input. No cfg,
+runtime, generation policy or patch changed. No bulk screen, second replay,
+full suite, manual gameplay or platform build was run. Publication-boundary
+and source-whitespace checks pass. The unrelated UI file and lab work remain
+untouched. There is no host CPU attribution or demonstrated speed gain yet.
+
+## Previous checkpoint: controller polling and byte stacks, 28 September 2026
 
 ### Finding and correction
 
