@@ -5,9 +5,9 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`1314cd4fa5e0bea9c3e5fea3c3d21315828158b6`](https://github.com/craigshaw/snesrecomp/commit/1314cd4fa5e0bea9c3e5fea3c3d21315828158b6)
+[`f4451a301072f64fd32a363abb8996037a034a41`](https://github.com/craigshaw/snesrecomp/commit/f4451a301072f64fd32a363abb8996037a034a41)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0029. All are published and retained under
+It contains patches 0001 through 0030. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
@@ -66,6 +66,7 @@ it introduces no further runtime source changes.
 | `0027-Time-selected-index-compare-and-increment.patch` | Enable CPX and INX with real-interpreter flag, width, clock and event/resume comparisons. |
 | `0028-Time-byte-stacks-and-instruction-timed-HVBJOY.patch` | Add balanced M1 PHA/PLA and DEX timing; scope reads so HVBJOY does not add a second beam advance. |
 | `0029-Time-selected-subtract-and-byte-memory-operations.patch` | Enable SEC, selected SBC forms and byte direct-page INC/DEC/ASL/ROL with interpreter and event/resume comparisons. |
+| `0030-Time-selected-word-shifts-and-local-X-saves.patch` | Add selected word ROL/LSR/SBC, accumulator ROR and local X0 PHX/PLX, with high-byte-first memory and stack writes. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee
@@ -149,18 +150,24 @@ interpreter. Unselected bodies retain their existing generation policy.
 Supported selected leaves have tested load/store operations, local branches,
 CMP, ADC and accumulator ASL. Patch 0024 adds ordinary direct JSR/JSL and
 immediate ORA. Unknown callee exits still block compiled continuations. External
-branch targets, indirect or special calls, indirect addressing, word stacks,
-unbalanced byte stacks, other stack operations, unselected memory RMW, RTI and block moves remain outside this mode.
-Unsupported selections fail generation. The normal selection uses 35 validated
-exact entries, including the three arithmetic-loop entries below. Direct JML, CPX and INX are
+branch targets, indirect or special calls, indirect addressing, other word stacks,
+unbalanced local stacks, other stack operations, unselected memory RMW, RTI and block moves remain outside this mode.
+Unsupported selections fail generation. The normal selection uses 38 validated
+exact entries, including the arithmetic-loop and word-operation entries below. Direct JML, CPX and INX are
 also supported by patches 0026 and 0027. Patch 0028 supports PHA/PLA with M=1
 and DEX. Stack depth must agree at joins and be zero at calls, tails and returns.
 Patch 0029 adds SEC, SBC immediate/absolute, M1 direct-page SBC and M1
-direct-page INC/DEC/ASL/ROL. Word memory RMW remains excluded. Its 134 complete
+direct-page INC/DEC/ASL/ROL. Other word memory RMW forms remain excluded. Its 134 complete
 and 198 event/resume comparisons cover carry, overflow, decimal subtraction,
 byte wraps, direct-page penalties, bus writes, width changes and local stacks.
 The validated title selection adds `01EBAE`, `01ECCB` and `01EF24`, all M1X0,
 for 342 bodies. See the recovery report for measured work and performance limits.
+Patch 0030 additionally supports M0 direct-page ROL/LSR/SBC, M0 accumulator
+ROR and X0 PHX/PLX. Selected word memory shifts and X saves write high byte
+first, matching the interpreter; ordinary stores remain unchanged. Stack
+validation counts bytes and retains the zero-depth transfer rule. Its 100
+complete and 198 event/resume comparisons support three further validated
+entries, `01E5DF`, `01E72F` and `01EE3E`, all M1X0, for 345 bodies.
 
 ## Evidence and limits
 

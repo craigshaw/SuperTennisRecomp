@@ -85,7 +85,18 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 342 variants
+## Accepted normal-build checkpoint: 345 variants
+
+`01E5DF:M1X0`, `01E72F:M1X0` and `01EE3E:M1X0` pass both saved replays
+with selected word-operation and local X-save timing. Word memory shifts and
+X pushes use the interpreter's high-byte-first write order. The analysis
+manifest is unchanged and no exit contract is added. The batch removes
+225,091 interpreted instructions in the longer replay, a 1.63% reduction,
+with about 1.1% less local rendered wall time. Most caller-loop work still
+runs interpreted; see [AOT_RECOVERY.md](AOT_RECOVERY.md) for the next bounded
+continuation question and measurement limits.
+
+## Previous checkpoint: 342 variants
 
 `01EBAE:M1X0`, `01ECCB:M1X0` and their helper `01EF24:M1X0` are validated
 with selected arithmetic and byte memory timing. Their analysis facts are

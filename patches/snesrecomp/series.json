@@ -1,7 +1,7 @@
 {
   "base_revision": "a64932f1af958f7e71a728ac1235d6cf911f71a0",
-  "integrated_revision": "1314cd4fa5e0bea9c3e5fea3c3d21315828158b6",
-  "integrated_patch_count": 29,
+  "integrated_revision": "f4451a301072f64fd32a363abb8996037a034a41",
+  "integrated_patch_count": 30,
   "patches": [
     {
       "file": "0001-Recognize-direct-long-call-trampolines.patch",
@@ -118,6 +118,10 @@
     {
       "file": "0029-Time-selected-subtract-and-byte-memory-operations.patch",
       "sha256": "28a5ab289ca2e6f876dffa475b56c82e82d67eb228cd3425ba549f12f7d728af"
+    },
+    {
+      "file": "0030-Time-selected-word-shifts-and-local-X-saves.patch",
+      "sha256": "7c20271de89e93762692e1e2d9c26d99f928cdbd459cb34b47fd5f66d71ffcdf"
     }
   ],
   "patched_files": {
@@ -127,7 +131,7 @@
     "recompiler-rs/src/insn.rs": "14bc167f9bdb98d3d06810433129cdd4974a878476860052f5d57bad923b31da",
     "recompiler/snes65816.py": "bc1f68c1eee311e9871b70f86c024e6cf6733c6ac8dd8257fd9fd7a51948f79d",
     "recompiler/snes_cycles.py": "a44156357d7322b9928ca224e3e15da9950d27f7d934785de3f8a3ebed652d8b",
-    "recompiler/v2/bus_timing.py": "9febd9d7ec57ffa5784d4f384443e74d7ab2fa5c84c99551f07b2b63c6a03ab3",
+    "recompiler/v2/bus_timing.py": "1bb194e0a8db2192a7a7f5a5949cd71d17514c8e38e939d4b784f19e2d6d20dc",
     "recompiler/v2/codegen.py": "1d970273472c199e2b0edd1da79258ba3e9873b916642c27584ce8b99c5e76df",
     "recompiler/v2/decoder.py": "680b901e9e9cd9eb630bf7f61bde7d9768379a524c3e786108e895906bfbaf7e",
     "recompiler/v2/emit_function.py": "d1228e37f508431077ad0cf1291a6b806eb46eb01a3878c81fc6b79e4384512c",
@@ -136,7 +140,7 @@
     "runner/runner.cmake": "21e27ef03dc317a72f0a80c5077e371597fc7c21a4df62262dda2d0d2a1d6f78",
     "runner/src/common_rtl.c": "578c8598d3567c16629e9ca86bd772b615220c742a975321b5d340a01bab4a26",
     "runner/src/cpu_state.h": "5e806db91ee9e01a4913231908660f11f72395fa43fbf7214f519393bd366890",
-    "runner/src/snes/aot_bus_timing.h": "31e14ec2bca7d12e9d46935ce6f83cfad5f0138b4f55720168709de17c50e43b",
+    "runner/src/snes/aot_bus_timing.h": "4b4b0abca612b058d2a51f2511e7b1d6461d0d1037964f1f89fa2ed9fb6ad1c7",
     "runner/src/snes/input_replay.c": "02d4b48b9d4713e1a924441886917c92599ee8888143d4ad17906947f128b605",
     "runner/src/snes/input_replay.h": "e360950c9e3b59dad386d5deadddc977f864decf084e7c1cff9d7eb0d3c8f06b",
     "runner/src/snes/interp816.c": "8860939e520bdcedd9e8498100c97db53b63f8213d6c9330b0a1adf05a389845",
@@ -153,7 +157,7 @@
     "tests/interp816/interp816_test.c": "96f820637d99c31b85164b1c52c56cddf4f22e97c5d3954935538fa4ec754e75",
     "tests/joypad/input_replay_test.c": "83187bc27411c3b5a96d0adab24ed452c9b042ccf9f0011c66f4444447e63965",
     "tests/ppu/ppu_sprite_limit_test.c": "b1dde2dbdc99e0c58b04a717844fd1835bd1b0a57f7643a8f1d98558ccfa84b9",
-    "tests/run_c_tests.sh": "8f9dc5bc3f324f571f9813f3796cd04119a8a19f0e0cdfc815e830ba49168f60",
+    "tests/run_c_tests.sh": "76ebceae4e5ff5575610fa7c9848fb520a1de5ddc22417c138b0f3f7244da0f7",
     "tests/runtime_dispatch/rdnmi_open_bus_test.c": "a7d20fe93f3cce95cb37ab8f0ec2d0f779b029f2ef8f362b0849e9514dd93668",
     "tests/test_snes_cycles.py": "e992e134849775f4a9e2ac3683f47193621306fd96beb751f4a0b0d28bce23df",
     "tests/timing/README.md": "1ef1e1b82c7c96ef01a2f67660b6dc2ec3b46e4e443b3021e1e2cd287dff499a",
@@ -190,7 +194,8 @@
     "tests/timing/test_tail_instruction_timing.py": "91a7e00abfae86444ccc5e3f73fe8e525371ff8ed7f786e5ecf672be6ab737f3",
     "tests/timing/test_index_instruction_timing.py": "f3d76ea6bd33700b2c3cc8c64e07ec79d40f05388ae77b5cb0d1c292a58c7661",
     "tests/timing/test_stack_instruction_timing.py": "e5de67dfe1c218d153c886af27046a6d26d3a3d7b0c2234534965ca8333fbcb8",
-    "tests/timing/test_subtract_rmw_instruction_timing.py": "ea134fc122af95d96052deee2c694769045a1888253dfdb8ea1f90142ba83412"
+    "tests/timing/test_subtract_rmw_instruction_timing.py": "c7618c1c1e3ac18e243a0d27af1e2dd856a5bea01927757841a00cff4877f4c8",
+    "tests/timing/test_word_instruction_timing.py": "e334c19a711ab2335bcf15a6236e67a3ee40fd223d9c0c0824973de126e92442"
   },
   "previous_integrated_revision": "3678d0a6d7036217f26e32f6b9087d2933783690",
   "previous_integrated_patch_count": 12

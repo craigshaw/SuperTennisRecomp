@@ -1,12 +1,101 @@
 # AOT recovery
 
-The accepted normal build generates **342 AOT bodies**, with snesrecomp
-`1314cd4`. The previous 339-body build used snesrecomp `42b0e44`; title
-`e23945a` recorded its cost profile. The latest batch adds `01EBAE`, `01ECCB`
-and their shared helper `01EF24`, all M1X0, with no removals.
+The accepted normal build generates **345 AOT bodies**. The previous
+342-body checkpoint is title `b4b2bae` with snesrecomp `1314cd4`. This batch
+adds `01E5DF`, `01E72F` and their shared helper `01EE3E`, all M1X0, with no
+removals. The new shared pin is `f4451a3`, described in `SNESRECOMP_PATCHES.md`.
 This report supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: arithmetic loops and their helper, 28 September 2026
+## Latest checkpoint: word operations and X saves, 28 September 2026
+
+### Bounded change and evidence
+
+Inspection confirmed that `01EE3E` is the early shared dependency of both
+callers. All three already have normal-analysis roots and inferred exits.
+The helper uses word direct-page SBC, ROL and LSR. The callers additionally
+need word accumulator ROR and local X0 PHX/PLX brackets. The candidate therefore
+included the helper from the start, reusing the previous batch's lesson.
+
+The first ROM-free comparisons exposed low-byte-first writes for word memory
+shifts. After correcting those, the remaining differences were the same byte
+order issue in word X pushes. The interpreter writes the high byte first in
+both cases. The private first and intermediate failure logs remain preserved.
+Patch 0030 routes only these selected word operations through a high-byte-first
+write helper. Ordinary word stores and unselected generation are unchanged.
+
+Stack validation now counts two bytes for X0 PHX/PLX, alongside existing byte
+PHA/PLA. Depth must agree at joins, never consume the caller's frame, and be
+zero at calls, tails and returns. X1 PHX/PLX, word PHA/PLA, index-width changes,
+and other word memory RMW forms remain excluded. The prior negative test for
+word ROL now rejects the still-unsupported word ASL form instead.
+
+The focused suite passes 100 complete interpreter comparisons and 198
+event/resume comparisons, including flags, decimal subtraction, direct-page
+penalties and address wrap, ordered writes and timestamps, mixed local stacks,
+width changes, SlowROM/FastROM, IRQ, NMI and refresh. Nine unsupported stack or
+operation paths fail closed. Both old title failures, at primary frames 934
+and 936, are retained as historical evidence; the new candidate passes them.
+
+### Title result and measured limits
+
+The candidate has exactly three additions and no removals. Its full normal
+Python analysis manifest is byte-identical to the 342-body manifest, and both
+pass the lab manifest reader. The private selection proposal removes only
+three `interpret_only` directives and selects the exact M1X0 variants. No new
+root, function boundary or exit contract is declared. There is no new Mesen
+claim, so no repeat Mesen capture is required.
+
+The primary replay passes all 2,125 frames, with 50, 49 and 99 compiled first
+instruction commits for `01E5DF`, `01E72F` and `01EE3E`. The longer replay passes
+all 4,816 frames with 49, 49 and 98 commits. Counts are taken beyond deadline
+and native-mode guards. Both runs have zero bailouts, tuple overflow or
+journal failures. Existing controls were reused; no bulk screen was repeated.
+
+On the longer input, interpreted instructions fall from 13,817,082 to
+**13,591,991**, a reduction of **225,091, or 1.63%**. Interpreted CPU cycles
+fall by 854,657. The new helper retains only 659 interpreted instructions, but
+the two caller bodies still account for 433,455 and 426,721 interpreted
+instructions. This is much less than their original full work moving to AOT.
+Do not describe all execution within these bodies as compiled.
+
+Two quiet alternating rendered pairs average 3.68878 seconds for 342 bodies
+and 3.64718 seconds for the candidate, about **1.1% less wall time**. Both
+pairs improve and all final images match. Capture and frame hashing are off.
+This is a modest local indication, not a stable performance estimate or a
+claim about sustained match frame rate. Guest instruction counts and host
+wall time remain separate measures.
+
+### Integration and next question
+
+The final Python v2 suite passes 402/402 and the shared C suite passes once
+for the final source, after useful work was measured. Fresh normal cfg-only
+generation reproduces all seven candidate C files and the full manifest, with
+345 bodies and 38 instruction-timing entries. Desktop and headless builds,
+the normal-library 4,816-frame reference comparison, the 180-frame neutral
+check, all seven workflow checks and all 30 patch checks pass. Publication
+and whitespace checks pass.
+
+The next useful question is why these now-compiled caller loops still do most
+of their work in the interpreter. Reuse this profile and make one bounded
+trace of the first compiled-to-interpreted transfer in `01E5DF`, recording
+PC/M/X, stack state, event/deadline reason and the eventual loop continuation.
+Hot remaining exact keys include `01E6EA:M1X0` and `01E6DB:M0X0`; the sibling
+loop includes `01E838:M1X0` and `01E834:M0X0`. A scheduler resume is a hypothesis
+to verify, not a new observed contract. Check whether a shared safe continuation
+can recover meaningful work before adding more operation support. Do not turn
+an internal PC into a new cfg function merely to make it dispatchable; stack
+context and generated temporary values also matter.
+
+Private evidence is under `captures/aot-word-20260928`, indexed by
+`captures/aot-word-current.txt` and follow-up records reachable through
+`captures/aot-recovery-current.txt`. It contains the baseline, candidate,
+synthetic failure and passing logs, entry counters, opcode profiles, lab
+selection review, benchmark and normal-generation comparison. The retained
+classification has 515 unadopted variants, with only these three removed.
+No manual gameplay, Windows build, native analyzer rebuild or five-replay
+sweep was run. Unrelated UI and lab work remains untouched.
+
+## Previous checkpoint: arithmetic loops and their helper, 28 September 2026
 
 ### Why the helper belongs in this batch
 
