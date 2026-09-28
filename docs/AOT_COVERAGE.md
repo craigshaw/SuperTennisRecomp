@@ -85,7 +85,15 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 337 variants
+## Accepted normal-build checkpoint: 338 variants
+
+The next focused milestone adds `00CE11:M1X0` using tested CPX and INX
+instruction timing. The primary and 4,816-frame replays pass, with 4,594
+compiled entries in the longer run. Normal generation reproduces the clean
+candidate. No accepted bodies are removed and no exit declaration is added.
+See [AOT_RECOVERY.md](AOT_RECOVERY.md) for the modest measured gain and limits.
+
+## Previous checkpoint: 337 variants
 
 The [28 September hot-root checkpoint](AOT_RECOVERY.md) adds `0088C1`,
 `019D3B`, `01A14A` and `02858C`, each M1X0. These frequent roots use selected

@@ -1,16 +1,95 @@
 # AOT recovery
 
-The accepted working tree now generates **337 AOT bodies**. Four frequent
-M1X0 roots are promoted through normal generation: `0088C1`, `019D3B`,
-`01A14A` and `02858C`. Their unvalidated dependencies remain interpreted.
-The 337-body checkpoint is committed in the title commit containing this
-report and pins published snesrecomp `b1d8ece`. Dependency patches 0023
-through 0026 are committed in order and exported for recovery. The previous
-published baseline was title `75a4410` and snesrecomp `60058e9`.
-This checkpoint supersedes the 333-body checkpoint below and the older
-handoff in `AOT_BATCH_SCREENING.md`.
+The accepted normal build now generates **338 AOT bodies**. The previous
+337-body checkpoint was committed and pushed as title `696805f` with
+snesrecomp `b1d8ece`. The focused follow-up adds only `00CE11:M1X0` and pins
+published snesrecomp `4cf00bb`. No accepted body is removed.
+This report supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: four hot roots, 28 September 2026
+## Latest checkpoint: index-loop timing, 28 September 2026
+
+### Accepted result
+
+`00CE11:M1X0` uses selected instruction timing for CPX and INX. The old
+bus-policy failure at frame 740 is absent in the primary and longer saved
+replays. The addition executes 1,900 times in 2,125 frames and 4,594 times in
+4,816 frames. Both captures match all saved comparison fields, with zero
+bailouts, tuple overflow and journal failures. No bulk screen was repeated.
+
+Patch 0027 permits CPX immediate, direct-page and absolute, plus INX. It changes
+only the selected instruction validator and synthetic tests. Existing emitted
+operations perform the comparison and increment. Fifty complete interpreter
+comparisons and 716 event/resume pairs cover both register widths, comparison
+flags, index wrap, direct-page penalties, repeated stores, deadlines, refresh,
+NMI and IRQ. An initial fixture failure used a masked IRQ with a scheduler
+encoded for M1; the corrected fixture enables IRQs. That failure was not a
+title or compiler regression. Both logs are retained privately.
+
+The cfg adds the observed exact root. It adds no exit declaration, boundary
+split or new exclusion. Normal Python analysis infers the new node's exit.
+The lab manifest reader validates both manifests; only the CE11 node and its
+inferred exit change. The private proposal records the exact selection and
+replay evidence. This is a title selection review, not acceptance by the lab's
+exit-M/X proposal rule. No new Mesen fact was needed.
+
+A quiet rendered benchmark averages 3.855 seconds for published 337 and
+3.756 seconds for the clean 338 candidate, about **2.6% less wall time**.
+Both alternating pairs improve and all final images match. Capture and frame
+hashing are disabled. This is a small local indication, not a stable benchmark
+or a desktop frame-rate claim. An earlier set overlapped another replay and
+is explicitly rejected; do not reuse it as performance evidence.
+
+### Parked 00804D experiment
+
+A bounded prefix ending at `008053` passed both saved replays. It executed
+348,609 times in the longer replay; the setup branch transferred to the
+interpreter four times. A separate branch counter verified that rare path.
+Call-gap sightings fell from 443,259 to 94,513, but rendered wall time improved
+only about 0.94% across two alternating pairs. That does not establish a useful
+speed gain. High entry frequency alone was a poor predictor of benefit here.
+
+The candidate also removed `00801E:M1X0`: exposing the compiled prefix made
+normal analysis require its unresolved setup-path exit proof. No exit contract
+was invented to restore the caller. The lab review records that removal and
+no exit-fact changes. The full 804D routine still has structural poison and
+unknown callee exits. The experiment did not solve that decoding question.
+
+The prefix cfg and external conditional-branch timing extension are **not
+promoted**. Their source diff, synthetic test, clean binaries, passing captures
+and benchmark remain under `parked-prefix-source` and related private folders.
+Tracked 804D behavior is unchanged. Do not repeat this experiment without a
+specific cost or correctness question that the saved evidence cannot answer.
+
+### Integration and remaining work
+
+The Python v2 suite passes 402/402 and the shared C suite passes once for the
+final CPX/INX change. All seven patch/workflow checks pass. Normal cfg-only
+Python generation produces 338 bodies and reproduces all seven clean C files
+and the full manifest exactly. The accepted policy selects 31 instruction-timed
+entries. The existing bus-cost policy is unchanged. Fresh desktop and headless builds
+succeed. A runner linked to the normal generated library matches all 4,816
+reference frames with zero diagnostics. The installed headless runner passes
+the 180-frame neutral check. All 27 patches verify; publication-boundary and
+source whitespace checks pass. The exported patch contains normal diff context
+markers, which are not source whitespace errors.
+
+The saved classification now has 522 of the original 860 variants outside
+normal adoption. Other historical failures retain their previous status.
+The next bounded instruction question is `00C818:M1X0`, starting from its
+saved frame-74 clock discrepancy and PHA/PLA plus DEX requirements. Keep stack
+balance and event resumes in scope. Do not broaden this into a bulk screen.
+For larger speed gains, obtain a cost profile before following entry counts.
+One short macOS `sample` attempt could not attach to our headless process;
+no usable cost profile was produced and no profiler setup work was pursued.
+
+No new manual gameplay, Windows build, five-replay sweep, native analyzer
+rebuild or Mesen capture was performed. The analyzer itself is unchanged.
+All ROM-derived evidence is private under `captures/aot-next-milestone-20260928`,
+indexed by `captures/aot-next-milestone-current.txt` and follow-up records reached
+through `captures/aot-recovery-current.txt`. Raw prior evidence is unchanged.
+Unrelated `recomp-ui/.DS_Store` and lab work were preserved.
+
+## Previous checkpoint: four hot roots, 28 September 2026
 
 ### Publication
 
