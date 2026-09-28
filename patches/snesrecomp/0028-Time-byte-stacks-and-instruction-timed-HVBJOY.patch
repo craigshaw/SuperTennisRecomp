@@ -1,0 +1,359 @@
+From 42b0e44244b554998a26f2ef7a128edfabbc2eaa Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Mon, 28 Sep 2026 18:22:01 +0100
+Subject: [PATCH] Time byte stacks and avoid duplicate HVBJOY beam ticks
+
+Support balanced M1 PHA/PLA and DEX in selected instruction timing. Reject unsafe stack paths, and scope timed reads so HVBJOY samples the current beam without adding the legacy polling tick. Preserve legacy reads and test real MMIO phase plus interpreter event resumes.
+
+Co-authored-by: Codex <codex@openai.com>
+---
+ recompiler/v2/bus_timing.py                   | 30 ++++++-
+ runner/src/snes/aot_bus_timing.h              | 12 ++-
+ runner/src/snes/interp_bridge.c               |  2 +
+ runner/src/snes/interp_bridge.h               |  4 +
+ runner/src/snes/snes.c                        |  6 +-
+ tests/dma/hdma_timing_test.c                  | 46 ++++++++++
+ tests/run_c_tests.sh                          |  1 +
+ tests/timing/README.md                        | 19 +++++
+ tests/timing/test_instruction_timing.py       |  2 +-
+ tests/timing/test_stack_instruction_timing.py | 84 +++++++++++++++++++
+ 10 files changed, 200 insertions(+), 6 deletions(-)
+ create mode 100644 tests/timing/test_stack_instruction_timing.py
+
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+index 9411225..01fc67c 100644
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -87,8 +87,10 @@ def validate_instruction_leaf(block_pairs, cfg):
+                                    and not op.terminal and not op.noreturn
+                                    and op.target is not None for op in ops))
+             supported = (
+-                (insn.mnem in ("RTS", "RTL", "NOP", "CLC", "DEY", "INX", "TYA", "XBA")
++                (insn.mnem in ("RTS", "RTL", "NOP", "CLC", "DEY", "INX", "DEX", "TYA", "XBA")
+                  and insn.mode == IMP)
++                or (insn.mnem in ("PHA", "PLA") and insn.mode == IMP
++                    and insn.m_flag == 1)
+                 # Index-width changes need separate narrowing/resume support.
+                 or (insn.mnem in ("REP", "SEP") and insn.mode == IMM
+                     and not (insn.operand & 0x10))
+@@ -105,6 +107,32 @@ def validate_instruction_leaf(block_pairs, cfg):
+             returns += insn.mnem in ("RTS", "RTL") or direct_long_tail(insn, ops)
+     if not returns:
+         raise ValueError("instruction timing requires a reachable RTS, RTL or direct JML")
++    if any(insn.mnem in ("PHA", "PLA")
++           for pairs in block_pairs.values() for insn, _ in pairs):
++        # Restrict this support to local byte-stack brackets. Equal depth at
++        # joins also rejects loops that accumulate pushes or consume frames.
++        depths = {cfg.entry: 0}
++        pending = [cfg.entry]
++        while pending:
++            key = pending.pop()
++            depth = depths[key]
++            for insn, ops in block_pairs[key]:
++                if insn.mnem == "PHA":
++                    depth += 1
++                elif insn.mnem == "PLA":
++                    depth -= 1
++                if depth < 0:
++                    raise ValueError("instruction timing cannot pull the caller's frame")
++                if depth and (insn.mnem in ("RTS", "RTL", "JSR", "JSL")
++                              or direct_long_tail(insn, ops)):
++                    raise ValueError("instruction timing requires balanced stack at transfers")
++            for successor in cfg.blocks[key].successors:
++                if successor in depths:
++                    if depths[successor] != depth:
++                        raise ValueError("instruction timing requires equal stack depth at joins")
++                else:
++                    depths[successor] = depth
++                    pending.append(successor)
+ 
+ 
+ class BusTimingLines(list):
+diff --git a/runner/src/snes/aot_bus_timing.h b/runner/src/snes/aot_bus_timing.h
+index f914474..3639cca 100644
+--- a/runner/src/snes/aot_bus_timing.h
++++ b/runner/src/snes/aot_bus_timing.h
+@@ -70,12 +70,20 @@ static inline void cpu_aot_insn_bus_extra(CpuAotInstructionTiming *timing,
+ static inline uint8 cpu_aot_insn_read8(CpuState *cpu, CpuAotInstructionTiming *timing,
+                                       uint8 bank, uint16 addr) {
+     cpu_aot_insn_bus_extra(timing, bank, addr, 1);
+-    return cpu_read8(cpu, bank, addr);
++    int saved = g_aot_instruction_read_active;
++    g_aot_instruction_read_active = 1;
++    uint8 value = cpu_read8(cpu, bank, addr);
++    g_aot_instruction_read_active = saved;
++    return value;
+ }
+ static inline uint16 cpu_aot_insn_read16(CpuState *cpu, CpuAotInstructionTiming *timing,
+                                         uint8 bank, uint16 addr) {
+     cpu_aot_insn_bus_extra(timing, bank, addr, 2);
+-    return cpu_read16(cpu, bank, addr);
++    int saved = g_aot_instruction_read_active;
++    g_aot_instruction_read_active = 1;
++    uint16 value = cpu_read16(cpu, bank, addr);
++    g_aot_instruction_read_active = saved;
++    return value;
+ }
+ static inline void cpu_aot_insn_write8(CpuState *cpu, CpuAotInstructionTiming *timing,
+                                       uint8 bank, uint16 addr, uint8 value) {
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index f9b32a0..50231e8 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -98,6 +98,8 @@ static void bridge_apu_flush(CpuState *cpu) {
+     RtlApuUnlock();
+     s_apu_pending_master = 0;
+ }
++int g_aot_instruction_read_active;
++
+ void interp_bridge_commit_instruction(CpuState *cpu, unsigned cycles,
+                                       uint64_t master) {
+     cpu->cycles += cycles;
+diff --git a/runner/src/snes/interp_bridge.h b/runner/src/snes/interp_bridge.h
+index d3e2092..d1b8714 100644
+--- a/runner/src/snes/interp_bridge.h
++++ b/runner/src/snes/interp_bridge.h
+@@ -77,6 +77,10 @@ int interp_bridge_run(CpuState *cpu, uint32_t entry_pc24);
+ void interp_bridge_commit_instruction(CpuState *cpu, unsigned cycles,
+                                       uint64_t master);
+ 
++/* Generated instruction-timed reads advance the beam at opcode completion.
++ * Scoped by aot_bus_timing.h so MMIO must not add a legacy polling tick. */
++extern int g_aot_instruction_read_active;
++
+ /* Faithful LLE of an infinite cooperative-scheduler loop (e.g. MMX's $8099 task
+  * scheduler): run the real ROM scheduler under interp816 from entry_pc24 and
+  * yield after one frame's slot walk — when it reaches yield_pc (its vblank-wait
+diff --git a/runner/src/snes/snes.c b/runner/src/snes/snes.c
+index c2eda89..a9b591a 100644
+--- a/runner/src/snes/snes.c
++++ b/runner/src/snes/snes.c
+@@ -567,9 +567,11 @@ uint8_t snes_readReg(Snes* snes, uint16_t adr) {
+       /* Whole-program interpreter runs already advance the beam from every
+        * opcode's measured master clocks. Applying the legacy static-recomp
+        * polling tick as well doubles time in $4212 wait loops (SMRPG's boot
+-       * fades completed in half the reference frame count). */
++       * fades completed in half the reference frame count). Selected generated
++       * instruction timing also owns this advance through opcode completion. */
+       extern int g_interp_apu_driving;
+-      if (!g_interp_apu_driving)
++      extern int g_aot_instruction_read_active;
++      if (!g_interp_apu_driving && !g_aot_instruction_read_active)
+         snes_advance_beam(snes, 64, false);
+       // Bit 7 = vblank. The real frame loop drives vblank via inNmi, not
+       // inVblank (inVblank is never set true), so on the static-recomp
+diff --git a/tests/dma/hdma_timing_test.c b/tests/dma/hdma_timing_test.c
+index b48819c..e353bf1 100644
+--- a/tests/dma/hdma_timing_test.c
++++ b/tests/dma/hdma_timing_test.c
+@@ -7,12 +7,26 @@
+ #include "snes/ppu.h"
+ #include "snes/snes.h"
+ #include "cpu_state.h"
++#include "snes/aot_bus_timing.h"
+ 
+ Ppu *g_ppu;
+ uint8_t g_snesrecomp_last_hdmaen;
+ bool g_fail;
+ int g_interp_apu_driving;
++int g_aot_instruction_read_active;
++uint8 g_memsel;
+ CpuState g_cpu;
++static Snes *read_snes;
++
++uint8 cpu_read8(CpuState *cpu, uint8 bank, uint16 addr) {
++    (void)cpu;
++    return snes_read(read_snes, ((uint32)bank << 16) | addr);
++}
++
++uint16 cpu_read16(CpuState *cpu, uint8 bank, uint16 addr) {
++    uint16 lo = cpu_read8(cpu, bank, addr);
++    return lo | ((uint16)cpu_read8(cpu, bank, (uint16)(addr + 1)) << 8);
++}
+ 
+ void wlog_addr_note_direct(uint32_t wa, uint8_t v, const char *via) {
+     (void)wa;
+@@ -173,6 +187,38 @@ int main(void) {
+     failures += check(dma->channel[0].tableAdr == 0x0203, "external beam owner consumed terminator");
+     failures += check(dma->channel[0].hdmaActive, "external beam owner preserves HDMAEN state");
+ 
++    /* The real HVBJOY read must sample the current phase. Instruction-timed
++     * reads already advance time on commit; a legacy 64-clock tick would
++     * cross HBlank and expire the joypad timer before this read. */
++    dma_reset(dma);
++    snes.hPos = 1012;
++    snes.vPos = 0;
++    snes.autoJoyTimer = 40;
++    read_snes = &snes;
++    CpuAotInstructionTiming timing = {4, 30};
++    uint8 value = cpu_aot_insn_read8(&g_cpu, &timing, 0, 0x4212);
++    failures += check(value == 1 && snes.hPos == 1012 && snes.autoJoyTimer == 40,
++                      "instruction read samples HVBJOY without a polling tick");
++    failures += check(g_aot_instruction_read_active == 0 && timing.master == 30,
++                      "instruction read restores scope and retains its bus cost");
++    snes_advance_master_cycles(&snes, timing.master);
++    failures += check(snes.hPos == 1042 && snes.autoJoyTimer == 10,
++                      "instruction completion advances the beam only once");
++    g_aot_instruction_read_active = 1;
++    value = (uint8)cpu_aot_insn_read16(&g_cpu, &timing, 0x80, 0x4212);
++    failures += check(value == 0x41 && snes.hPos == 1042 &&
++                          g_aot_instruction_read_active == 1,
++                      "word and mirrored reads preserve an outer timing scope");
++    g_aot_instruction_read_active = 0;
++    g_interp_apu_driving = 1;
++    value = snes_read(&snes, 0x4212);
++    failures += check(value == 0x41 && snes.hPos == 1042,
++                      "interpreter-owned read still has no polling tick");
++    g_interp_apu_driving = 0;
++    value = snes_read(&snes, 0x4212);
++    failures += check(value == 0x40 && snes.hPos == 1106,
++                      "legacy read retains its existing polling tick");
++
+     dma_free(dma);
+     if (failures) return 1;
+     puts("hdma_timing_test: ok");
+diff --git a/tests/run_c_tests.sh b/tests/run_c_tests.sh
+index 13001a9..22c83cf 100644
+--- a/tests/run_c_tests.sh
++++ b/tests/run_c_tests.sh
+@@ -97,6 +97,7 @@ python3 "$ROOT/tests/timing/test_tail_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_branch_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_status_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_index_instruction_timing.py"
++python3 "$ROOT/tests/timing/test_stack_instruction_timing.py"
+ 
+ echo "=== DSP-1 bus/core shell ==="
+ "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+index 6586455..b2aec6f 100644
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -259,3 +259,22 @@ comparison flags, index wrap, direct-page penalties and a repeated indexed-store
+ loop with the real interpreter. It checks 50 complete executions and 716
+ deadline, refresh, NMI and IRQ stop/resume pairs. It does not enable stack
+ instructions or external short branches.
++
++## Balanced byte accumulator stack
++
++Selected instruction timing supports PHA and PLA with M=1, plus DEX in both
++index widths. Stack depth must agree at control-flow joins and return to zero
++before a call, tail transfer or return. Pulling the caller's frame is rejected.
++Word stack operations remain unsupported in this mode.
++
++`test_stack_instruction_timing.py` checks 18 complete executions and 432
++event/resume comparisons against the real interpreter, including nested byte
++stacks, a balanced loop, accumulator high-byte preservation, DEX wrap, both
++index widths and SlowROM/FastROM. Six rejected programs cover unsupported
++stack paths. These tests do not establish general stack or coroutine support.
++
++Instruction-timed bus reads use a saved/restored read scope. The real HVBJOY
++register handler suppresses its legacy synthetic beam tick inside this scope;
++the shared instruction completion advances time. The HDMA/MMIO test verifies
++HBlank and auto-joypad phase, byte and mirrored word reads, scope restoration,
++and preservation of the legacy and interpreter read paths.
+diff --git a/tests/timing/test_instruction_timing.py b/tests/timing/test_instruction_timing.py
+index d769673..da21ec4 100644
+--- a/tests/timing/test_instruction_timing.py
++++ b/tests/timing/test_instruction_timing.py
+@@ -136,7 +136,7 @@ class InstructionTiming(unittest.TestCase):
+         with patch.dict(os.environ, {"SNESRECOMP_EMIT_BUS_TIMING": "1",
+                                     bus_timing.INSTRUCTION_ENV: "008000:1:0"}):
+             for code in ([0xFC, 0x10, 0x80, 0x6B], [0x22, 0, 0x10, 0, 0x6B],
+-                         [0x48, 0x68, 0x6B],
++                         [0xC2, 0x20, 0x48, 0x68, 0x6B],
+                          [0xB1, 0x40, 0x6B], [0x40], [0xEE, 0, 0x10, 0x6B]):
+                 with self.assertRaises(ValueError):
+                     timing.emit_function(bytes(code) + bytes(32768-len(code)),
+diff --git a/tests/timing/test_stack_instruction_timing.py b/tests/timing/test_stack_instruction_timing.py
+new file mode 100644
+index 0000000..744b6fd
+--- /dev/null
++++ b/tests/timing/test_stack_instruction_timing.py
+@@ -0,0 +1,84 @@
++"""Balanced byte accumulator stacks retain interpreter timing on resume."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++from unittest.mock import patch
++
++import run as timing
++
++
++def cases():
++    result = []
++    for xf in (0, 1):
++        for fast in (0, 1):
++            for value, index in ((0, 0), (0x7F, 1), (0x80, 0x80 if xf else 0x8000),
++                                 (0xFF, 0xFF if xf else 0xFFFF)):
++                result.append(dict(
++                    name=f"stack-{xf}-{fast}-{value}", xf=xf, x=index,
++                    pc=0x808000 if fast else 0x008000, memsel=fast,
++                    # Two nested brackets expose byte order and live stack
++                    # state when an event stops between push and pull.
++                    code=[0xA9, value, 0x48, 0xA9, value ^ 0xFF, 0x48,
++                          0xA9, 0, 0x68, 0x8D, 0x20, 0x10, 0x68,
++                          0x8D, 0x21, 0x10, 0xCA, 0x8E, 0x22, 0x10, 0x6B]))
++    result.append(dict(name="preserve-high-byte", code=[
++        0xC2, 0x20, 0xA9, 0x34, 0xAB, 0xE2, 0x20,
++        0x48, 0xA9, 0xFE, 0x68, 0xC2, 0x20, 0x8D, 0x20, 0x10,
++        0xE2, 0x20, 0x6B]))
++    result.append(dict(name="balanced-loop", x=2, code=[
++        0xBD, 0x40, 0x10, 0x48, 0x49, 0xFF, 0x9D, 0x50, 0x10,
++        0x68, 0x9D, 0x60, 0x10, 0xCA, 0x10, 0xF0, 0x6B],
++        memory={0x1040: 0x80, 0x1041: 0x7F, 0x1042: 0xFF}))
++    for case in result:
++        case.update(instruction_timing=True, status=0)
++    return result
++
++
++class StackInstructionTiming(unittest.TestCase):
++    def test_unsupported_stack_paths_fail_closed(self):
++        rejected = [
++            [0x68, 0x6B],  # Pulling the caller's frame.
++            [0x48, 0x6B],  # Returning with live local data.
++            [0x48, 0xD0, 0xFD, 0x68, 0x6B],  # Growing stack loop.
++            [0xAD, 0, 0x10, 0xD0, 1, 0x48, 0x68, 0x6B],  # Unequal join.
++            [0xC2, 0x20, 0x48, 0x68, 0x6B],  # Untested word stack.
++            [0x48, 0x22, 0, 0x81, 0, 0x68, 0x6B],  # Live data across call.
++        ]
++        with patch.dict(os.environ, {"SNESRECOMP_EMIT_INSTRUCTION_TIMING": "008000:1:0"}):
++            for code in rejected:
++                with self.subTest(code=code), self.assertRaises(ValueError):
++                    timing.emit_function(bytes(code) + bytes(32768-len(code)),
++                                         bank=0, start=0x8000, entry_m=1, entry_x=0)
++
++    def test_complete_and_event_parity(self):
++        with tempfile.TemporaryDirectory(prefix="snes-stack-timing-") as temp, patch.dict(
++                os.environ, {k: v for k, v in os.environ.items()
++                             if not k.startswith("SNESRECOMP_")}, clear=True):
++            tests = cases()
++            binary = timing.build(Path(temp), os.environ.get("CC", "cc"), tests)
++
++            def run(i, tier, *args):
++                p = subprocess.run([str(binary), str(i), tier, *args],
++                                   capture_output=True, text=True, timeout=10)
++                self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
++                return json.loads(p.stdout)
++
++            checks = 0
++            for i, case in enumerate(tests):
++                with self.subTest(case=case["name"]):
++                    self.assertEqual(run(i, "interp"), run(i, "aot"))
++                for event in ("63", "84", "100", "115", "140", "165", "190",
++                              "220", "250", "refresh", "beam-nmi", "irq:115"):
++                    for resume in ((), ("resume",)):
++                        with self.subTest(case=case["name"], event=event, resume=resume):
++                            self.assertEqual(run(i, "event-interp", event, *resume),
++                                             run(i, "event-aot", event, *resume))
++                        checks += 1
++            print(f"Stack instruction timing: {len(tests)} complete and {checks} event comparisons")
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.54.0 (Apple Git-157)
+

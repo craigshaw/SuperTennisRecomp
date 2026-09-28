@@ -1,12 +1,105 @@
 # AOT recovery
 
-The accepted normal build now generates **338 AOT bodies**. The previous
-337-body checkpoint was committed and pushed as title `696805f` with
-snesrecomp `b1d8ece`. The focused follow-up adds only `00CE11:M1X0` and pins
-published snesrecomp `4cf00bb`. No accepted body is removed.
+The accepted normal build now generates **339 AOT bodies**. The previous
+338-body checkpoint is title `886d884` with snesrecomp `4cf00bb`. This follow-up
+adds only `00C818:M1X0`, with no removals, and pins snesrecomp `42b0e44`.
 This report supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: index-loop timing, 28 September 2026
+## Latest checkpoint: controller polling and byte stacks, 28 September 2026
+
+### Finding and correction
+
+The saved classification identified a 64-master-clock frame difference at
+frame 74 when compiling `00C818:M1X0`. Adding selected PHA/PLA and DEX timing
+alone reproduced exactly that failure. The first private candidate remains
+preserved. Do not describe stack support alone as the fix.
+
+A bounded 74-frame comparison used an interpreted control and the candidate.
+Both entered at guest master clock 26,050,684 with identical recorded registers, stack and
+beam position. Immediately after the first `$4212` read, at `00C81B:M1X0`,
+both had charged four CPU cycles and 30 master clocks. The interpreted beam
+was line 234, position 1042, and A was `AC80`; the compiled beam was at 1106
+and A was `ACC0`. The extra HBlank bit was then hidden by AND #1. Immediately before RTL,
+CPU and master totals still matched but the compiled beam remained 64 clocks
+ahead. The frame scheduler consequently reached its boundary with 64 fewer
+master clocks. These are observed differences, not an inferred exit contract.
+
+The shared HVBJOY handler applies a legacy 64-clock polling tick when execution
+is not owned by the interpreter. Selected compiled instruction timing already
+advances the beam at opcode completion. Patch 0028 gives these reads a
+saved/restored scope and suppresses the extra tick. Ordinary compiled reads
+retain the tick; interpreter reads retain their existing behavior. This does
+not change APU ownership, the title scheduler or an instruction's bus cost.
+
+The same patch permits M1 PHA/PLA and DEX in selected instruction timing.
+Generation requires equal byte-stack depth at joins, prohibits pulling the
+caller frame, and requires depth zero at calls, tails and returns. Word stack
+operations and general coroutine support remain excluded. Eighteen complete
+synthetic comparisons and 432 event/resume comparisons cover nested stacks,
+a balanced loop, high-byte preservation, index widths, wrap, SlowROM/FastROM,
+IRQ, NMI, refresh and deadlines. Six malformed or unsupported paths are rejected.
+A real SNES MMIO test checks HBlank and auto-joypad phase, byte and mirrored
+word reads, scope restoration, and the unchanged legacy/interpreter paths.
+
+### Title validation and measured result
+
+With the MMIO correction, the primary replay matches all 2,125 frames, including
+1,900 compiled `00C818:M1X0` entries, with zero bailouts, tuple overflow or
+journal failures. The saved 338-body control and classifications are reused.
+Only the short diagnosis needed a new disabled control. No bulk screen ran.
+
+Normal Python cfg-root analysis reaches the new exact entry and infers its
+exit. The lab manifest reader validates both manifests. Only the C818 node
+and its inferred exit change. The private proposal cites the saved entry
+observation, bounded failure probe and passing replay. It adds no exit
+declaration, new function partition or exclusion. No Mesen contract proposal
+or fresh Mesen observation was required.
+
+Two quiet alternating rendered benchmark pairs average 3.83693 seconds for
+338 bodies and 3.83619 seconds for the clean candidate. The difference is
+about 0.02%, effectively unchanged, and both pairs do not agree on direction.
+All four final images match. Capture and frame hashing are disabled. This is
+a correctness and coverage result, **not a measured speed improvement**.
+Do not use the 1,900 compiled entries to claim a meaningful performance gain.
+
+### Integration and next step
+
+The Python v2 suite passes 402/402. The final shared C suite passes. Its first
+run found an old assertion that rejected all PHA/PLA pairs; that test now
+rejects the still-unsupported word pair instead. The new failure-path tests
+continue to reject unsafe byte stacks. The focused MMIO and stack checks pass.
+Normal cfg-only generation reproduces all seven clean C files and the full
+manifest exactly, with 339 bodies and 32 selected instruction-timing entries.
+Fresh desktop and headless builds succeed. A runner linked to the normal
+generated library matches all 4,816 reference frames with zero diagnostics;
+the installed runner passes the 180-frame neutral check. All seven workflow
+checks and all 28 patch checks pass. The publication boundary and source
+whitespace checks pass.
+
+The original 860-body discovery set now has 521 variants outside adoption.
+The saved classification is carried forward with only the accepted C818 key
+removed. Historical rejection strings describe the compiler at capture time;
+recheck a selected candidate instead of rerunning the entire screen.
+
+The next priority is one bounded cost profile of the current build on the
+existing longer replay. The 804D prefix and C818 results show why call-gap
+frequency alone is insufficient. Reuse the existing interpreter instruction
+and cycle counters and, if needed, a private per-PC tally or an available host
+profiler. Guest-cycle counts and host CPU cost must remain separate measures.
+Do not repeat the unavailable macOS sample attach without a concrete setup
+change. Choose the next caller group or loop from that evidence before adding
+more instruction support. The old D45C frame-1505 failure and wider nine-address
+failure group remain unmodified evidence, not newly established priorities.
+
+Private evidence is under `captures/aot-stack-20260928`, indexed by
+`captures/aot-stack-current.txt`. Follow-up records in the earlier recovery
+workspaces make it discoverable from `captures/aot-recovery-current.txt`.
+The workspace preserves the 338 build, both candidates, first failure, exact
+entry/after-read/return probe, source/build commands, proposal, tests and benchmark.
+No new manual gameplay, Windows build, native analyzer rebuild or five-replay
+sweep was performed. The lab repository and unrelated UI work were untouched.
+
+## Previous checkpoint: index-loop timing, 28 September 2026
 
 ### Accepted result
 

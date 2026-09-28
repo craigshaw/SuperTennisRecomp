@@ -85,7 +85,15 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 338 variants
+## Accepted normal-build checkpoint: 339 variants
+
+`00C818:M1X0` is validated with balanced byte-stack instruction timing and
+HVBJOY reads that leave beam advancement to instruction completion. The old
+frame-74 discrepancy is resolved. There are no removals or new exit declarations.
+This is a correctness and coverage improvement; the small rendered benchmark
+shows no measurable speed gain. See [AOT_RECOVERY.md](AOT_RECOVERY.md).
+
+## Previous checkpoint: 338 variants
 
 The next focused milestone adds `00CE11:M1X0` using tested CPX and INX
 instruction timing. The primary and 4,816-frame replays pass, with 4,594

@@ -5,14 +5,15 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`4cf00bbdcaca75e28dfaecfb5c8f6102a07d41f9`](https://github.com/craigshaw/snesrecomp/commit/4cf00bbdcaca75e28dfaecfb5c8f6102a07d41f9)
+[`42b0e44244b554998a26f2ef7a128edfabbc2eaa`](https://github.com/craigshaw/snesrecomp/commit/42b0e44244b554998a26f2ef7a128edfabbc2eaa)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0027. All are published and retained under
+It contains patches 0001 through 0028. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
 AOT selection with `interpret_only`. Patch 0026 adds direct JML instruction
-timing. Patch 0027 enables tested CPX and INX instruction timing. Normal setup applies pending patches and
+timing. Patch 0027 enables tested CPX and INX instruction timing. Patch 0028
+adds balanced byte stacks and prevents a duplicate beam tick on instruction-timed HVBJOY reads. Normal setup applies pending patches and
 verifies the complete source.
 
 Patch 0022 extends selected native leaf instruction timing. Patch 0021
@@ -63,6 +64,7 @@ it introduces no further runtime source changes.
 | `0025-Separate-exit-analysis-from-AOT-selection.patch` | Infer normal exact exits while keeping selected dependencies interpreted; preserve unresolved-path checks and reject unsupported legacy emission. |
 | `0026-Time-direct-tail-transfers-at-instruction-boundaries.patch` | Commit direct JML clocks and PB, then check events at the destination before either tier executes. |
 | `0027-Time-selected-index-compare-and-increment.patch` | Enable CPX and INX with real-interpreter flag, width, clock and event/resume comparisons. |
+| `0028-Time-byte-stacks-and-instruction-timed-HVBJOY.patch` | Add balanced M1 PHA/PLA and DEX timing; scope reads so HVBJOY does not add a second beam advance. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee
@@ -102,9 +104,9 @@ python tools/apply-snesrecomp-patches.py --check
 ```
 
 The tool verifies the complete source at the current pin without applying
-patches. At the older recovery pin or upstream base it applies fifteen or
-twenty-seven patches respectively to a clean checkout. It verifies patch SHA-256
-values and the contents of all 68 affected files against
+patches. At the older recovery pin or upstream base it applies sixteen or
+twenty-eight patches respectively to a clean checkout. It verifies patch SHA-256
+values and the contents of all 69 affected files against
 [`series.json`](../patches/snesrecomp/series.json). Source-file comparisons
 normalise CRLF line endings for Windows; patch files retain their exact bytes.
 An already complete series is verified without writing. An incomplete series
@@ -123,9 +125,9 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
-and selects 31 exact entries for instruction timing, including the four
+and selects 32 exact entries for instruction timing, including the four
 frequent roots validated in the latest recovery batch.
-The normal output has 338 AOT bodies. The bus-cost selection contains 170
+The normal output has 339 AOT bodies. The bus-cost selection contains 170
 exact keys, of which 136 emit bodies with corrected costs and block timing.
 The other 34 remain interpreted under the validated cfg exclusions and exit
 proofs. Preserve this selection with the cfg; see [the recovery report](AOT_RECOVERY.md).
@@ -146,11 +148,12 @@ interpreter. Unselected bodies retain their existing generation policy.
 Supported selected leaves have tested load/store operations, local branches,
 CMP, ADC and accumulator ASL. Patch 0024 adds ordinary direct JSR/JSL and
 immediate ORA. Unknown callee exits still block compiled continuations. External
-branch targets, indirect or special calls, indirect addressing, stack
-manipulation, memory RMW, RTI and block moves remain outside this mode.
-Unsupported selections fail generation. The normal selection uses 27 validated
+branch targets, indirect or special calls, indirect addressing, word stacks,
+unbalanced byte stacks, other stack operations, memory RMW, RTI and block moves remain outside this mode.
+Unsupported selections fail generation. The normal selection uses 28 validated
 leaves and the four validated call-bearing roots. Direct JML, CPX and INX are
-also supported by patches 0026 and 0027.
+also supported by patches 0026 and 0027. Patch 0028 supports PHA/PLA with M=1
+and DEX. Stack depth must agree at joins and be zero at calls, tails and returns.
 
 ## Evidence and limits
 
