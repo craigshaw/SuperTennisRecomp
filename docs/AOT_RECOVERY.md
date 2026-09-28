@@ -1,11 +1,102 @@
 # AOT recovery
 
-The accepted normal build generates **339 AOT bodies**, at title `39871de`
-with snesrecomp `42b0e44`. The latest work is a private cost profile, with no
-change to the accepted selection, runtime or generated output.
+The accepted normal build generates **342 AOT bodies**, with snesrecomp
+`1314cd4`. The previous 339-body build used snesrecomp `42b0e44`; title
+`e23945a` recorded its cost profile. The latest batch adds `01EBAE`, `01ECCB`
+and their shared helper `01EF24`, all M1X0, with no removals.
 This report supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: measured interpreter work, 28 September 2026
+## Latest checkpoint: arithmetic loops and their helper, 28 September 2026
+
+### Why the helper belongs in this batch
+
+The first clean candidate compiled only `01EBAE` and `01ECCB`. It passed the
+primary and longer replay, but removed only 5,580 interpreted instructions in
+4,816 frames, or 0.037% of the baseline total. Its measured prefixes accounted
+for 20 instructions per compiled entry. Generated code shows both routines
+transferring scheduler ownership to interpreted `01EF24` at their early call.
+The busy caller continuations then stay interpreted. These observations and
+the generated transfer explain why simply enabling the pair has little value.
+That candidate and its measurements are preserved; it was not promoted alone.
+
+This was the concrete coverage gap that justified including `01EF24`. It adds
+only byte direct-page ASL/ROL and SBC requirements to the first pair's SEC,
+SBC immediate/absolute and byte direct-page INC/DEC timing. Patch 0029 enables
+these forms in selected instruction timing. Existing lowering and emission
+perform the operations. Word memory RMW, other addressing modes, index-width
+changes and word stacks remain excluded. The existing scoped MMIO-read and
+balanced byte-stack rules are unchanged.
+
+The final focused tests pass 134 complete interpreter comparisons and 198
+event/resume comparisons. They cover arithmetic flags, decimal subtraction,
+operand widths, byte carry chains and wraps, direct-page penalties and wrap,
+SlowROM/FastROM, writes and their timestamps, local stacks, IRQ, NMI and
+refresh. Four unsupported memory-operation paths fail closed. The initial
+smaller source passed 73 complete and 126 event comparisons before the helper
+gap was measured. No behavioral failure was found in either title candidate.
+
+### Validated execution and measured benefit
+
+The final clean candidate generates exactly three additions, with no removals.
+Its full normal Python analysis manifest is byte-identical to the baseline.
+The lab manifest reader validates both files. Existing roots and inferred
+exits suffice; the cfg change removes only three `interpret_only` directives.
+There is no exit declaration, new boundary, private-profile dependency or
+Mesen exit-contract claim. No repeat Mesen capture is needed for this selection.
+
+The primary 2,125-frame replay passes with 78, 79 and 157 compiled executions
+of `01EBAE`, `01ECCB` and `01EF24`, respectively. The longer 4,816-frame replay
+passes with 139, 140 and 292. Private counters increment after each routine's
+first generated instruction commits, beyond its deadline and native-mode
+guards. Both runs have zero bailouts, tuple overflow and journal failures.
+The accepted controls and saved old frame-85/87 failures were reused.
+
+The longer replay falls from 14,932,604 to **13,817,082 interpreted instructions**:
+**1,115,522 fewer, or 7.47%**. Interpreted CPU cycles fall by 4,367,405.
+These are guest-work measurements. Some loop work still resumes in the
+interpreter after scheduler events: the three decoded bodies retain 417,504
+interpreted instructions. Do not claim that their entire profiled work moved
+to AOT, or that their work-share reduction predicts host speed.
+
+Two quiet alternating rendered benchmark pairs average 3.84294 seconds for
+339 bodies and 3.78300 seconds for the clean 342-body candidate: about **1.6%
+less wall time**. Both pairs improve and all four final images match. Capture
+and frame hashing are disabled. This is a modest local indication, not a
+stable benchmark or a sustained match-frame-rate claim. Most work in these
+routines occurs early in this input.
+
+### Integration and next step
+
+Final Python v2 tests pass 402/402 and the final shared C suite passes. An
+initial full pass also ran before the helper gap was identified; the source
+extension required the final pass. For the next batch, measure the candidate's
+useful work before starting the final full suites. No bulk screen was repeated.
+
+Normal cfg-only generation reproduces all seven clean C files and the complete
+manifest exactly, with 342 bodies and 35 selected instruction-timing entries.
+Fresh desktop and headless builds succeed. The normal generated library passes
+the 4,816-frame reference comparison; the installed runner passes the 180-frame
+neutral check. All seven workflow checks and 29 patch checks pass. Publication
+and whitespace checks pass. The shared change is committed and pushed as
+`1314cd4`, with ordered patch 0029 retained for recovery.
+
+The next bounded family remains `01E5DF` and `01E72F`, but first inspect their
+early call to interpreted `01EE3E`. Do not repeat the pair-only mistake above.
+Then assess the required X0 PHX/PLX and M0 accumulator ROR timing together
+with any measured helper requirement. Their previous failures remain evidence;
+two successful additions are not assumed. The parked 804D prefix, unrelated
+exit-proof groups and historical bulk failures stay outside this batch.
+
+Private evidence is under `captures/aot-alu-20260928`, indexed by
+`captures/aot-alu-current.txt` and follow-up records reachable from
+`captures/aot-recovery-current.txt`. It preserves both candidates, exact build
+and replay commands, raw opcode counts, committed-instruction entry counters,
+lab proposal review, benchmarks, test logs and the normal-generation comparison.
+The historical classification now has 518 unadopted variants, with only these
+three keys removed. No manual gameplay, Windows build, native analyzer rebuild
+or five-replay sweep was run. The unrelated UI and lab changes remain untouched.
+
+## Previous checkpoint: measured interpreter work, 28 September 2026
 
 ### Measurement and validation
 

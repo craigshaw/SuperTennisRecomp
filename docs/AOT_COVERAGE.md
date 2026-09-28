@@ -85,7 +85,18 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 339 variants
+## Accepted normal-build checkpoint: 342 variants
+
+`01EBAE:M1X0`, `01ECCB:M1X0` and their helper `01EF24:M1X0` are validated
+with selected arithmetic and byte memory timing. Their analysis facts are
+unchanged; only the existing interpreted selection changes. Compiling the
+pair alone left their busy loops interpreted after the helper call. The full
+three-entry batch removes 1,115,522 interpreted instructions in the longer
+replay, a 7.47% reduction. Local rendered wall time improves by about 1.6%,
+with the limits recorded in [AOT_RECOVERY.md](AOT_RECOVERY.md). No bodies are
+removed and no exit declaration is added.
+
+## Previous checkpoint: 339 variants
 
 `00C818:M1X0` is validated with balanced byte-stack instruction timing and
 HVBJOY reads that leave beam advancement to instruction completion. The old

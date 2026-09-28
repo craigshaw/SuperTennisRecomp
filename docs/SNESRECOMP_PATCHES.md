@@ -5,9 +5,9 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`42b0e44244b554998a26f2ef7a128edfabbc2eaa`](https://github.com/craigshaw/snesrecomp/commit/42b0e44244b554998a26f2ef7a128edfabbc2eaa)
+[`1314cd4fa5e0bea9c3e5fea3c3d21315828158b6`](https://github.com/craigshaw/snesrecomp/commit/1314cd4fa5e0bea9c3e5fea3c3d21315828158b6)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0028. All are published and retained under
+It contains patches 0001 through 0029. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
@@ -65,6 +65,7 @@ it introduces no further runtime source changes.
 | `0026-Time-direct-tail-transfers-at-instruction-boundaries.patch` | Commit direct JML clocks and PB, then check events at the destination before either tier executes. |
 | `0027-Time-selected-index-compare-and-increment.patch` | Enable CPX and INX with real-interpreter flag, width, clock and event/resume comparisons. |
 | `0028-Time-byte-stacks-and-instruction-timed-HVBJOY.patch` | Add balanced M1 PHA/PLA and DEX timing; scope reads so HVBJOY does not add a second beam advance. |
+| `0029-Time-selected-subtract-and-byte-memory-operations.patch` | Enable SEC, selected SBC forms and byte direct-page INC/DEC/ASL/ROL with interpreter and event/resume comparisons. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee
@@ -149,11 +150,17 @@ Supported selected leaves have tested load/store operations, local branches,
 CMP, ADC and accumulator ASL. Patch 0024 adds ordinary direct JSR/JSL and
 immediate ORA. Unknown callee exits still block compiled continuations. External
 branch targets, indirect or special calls, indirect addressing, word stacks,
-unbalanced byte stacks, other stack operations, memory RMW, RTI and block moves remain outside this mode.
-Unsupported selections fail generation. The normal selection uses 28 validated
-leaves and the four validated call-bearing roots. Direct JML, CPX and INX are
+unbalanced byte stacks, other stack operations, unselected memory RMW, RTI and block moves remain outside this mode.
+Unsupported selections fail generation. The normal selection uses 35 validated
+exact entries, including the three arithmetic-loop entries below. Direct JML, CPX and INX are
 also supported by patches 0026 and 0027. Patch 0028 supports PHA/PLA with M=1
 and DEX. Stack depth must agree at joins and be zero at calls, tails and returns.
+Patch 0029 adds SEC, SBC immediate/absolute, M1 direct-page SBC and M1
+direct-page INC/DEC/ASL/ROL. Word memory RMW remains excluded. Its 134 complete
+and 198 event/resume comparisons cover carry, overflow, decimal subtraction,
+byte wraps, direct-page penalties, bus writes, width changes and local stacks.
+The validated title selection adds `01EBAE`, `01ECCB` and `01EF24`, all M1X0,
+for 342 bodies. See the recovery report for measured work and performance limits.
 
 ## Evidence and limits
 

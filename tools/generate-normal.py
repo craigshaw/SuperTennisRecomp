@@ -41,6 +41,7 @@ def main():
         "0088C1:1:0", "019D3B:1:0", "01A14A:1:0", "02858C:1:0",
         "00CE11:1:0",
         "00C818:1:0",
+        "01EBAE:1:0", "01ECCB:1:0", "01EF24:1:0",
     ))
     # Preserve the validated bulk and recovery selections.
     # Global bus timing stays disabled.
