@@ -143,10 +143,10 @@ Run the desktop build with the launcher:
 ./build/super_tennis
 ```
 
-The public submodule pin includes the required runtime fixes and per-entry
-bus-cost selector and split-source timing-header fix. Setup verifies the
-source against the exported patch series.
-The pinned dependency includes the extension to selected leaf instruction timing.
+The public submodule pin includes the runtime fixes, per-entry bus-cost
+selector, split-source timing-header fix and selected leaf instruction timing.
+The pin also includes exact-entry exit declarations, interpreted selection and
+direct call/tail instruction timing. Setup verifies the exported patch series.
 Normal regeneration uses the tracked cfg and generation policy; no gameplay
 profile is required.
 See [the patch guide](docs/SNESRECOMP_PATCHES.md) for verification and recovery.

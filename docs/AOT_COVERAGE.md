@@ -85,7 +85,29 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 329 variants
+## Accepted normal-build checkpoint: 337 variants
+
+The [28 September hot-root checkpoint](AOT_RECOVERY.md) adds `0088C1`,
+`019D3B`, `01A14A` and `02858C`, each M1X0. These frequent roots use selected
+instruction timing. Their unvalidated dependencies remain interpreted through
+`interpret_only`, which permits normal exit analysis without asserting an exit
+contract. The combined candidate passes the saved 4,816-frame replay, with
+about 348,600 compiled entries per addition and no tier-2 diagnostics.
+Normal generation reproduces the clean candidate C and manifest without a
+private profile or runtime deny guard. See the recovery report for the final
+integration checks, performance measurement and limits.
+
+## Previous checkpoint: 333 variants
+
+The [28 September recovery report](AOT_RECOVERY.md) records four additional
+callers of interpreted `02A3E2:M1X0`. A new exact-entry exit declaration uses
+repeat Mesen evidence without declaring exits for the other entry widths.
+Normal generation reproduces all seven passing candidate C files and the full
+manifest. The final runtime and generated library passed the 4,816-frame
+comparison and the installed headless runner passed the 180-frame smoke check.
+That checkpoint preceded the four hot-root promotions above.
+
+## Previous checkpoint: 329 variants
 
 The [13 September recovery report](AOT_RECOVERY.md) records 20 further adopted
 bodies, their exact execution evidence and the remaining classification. The

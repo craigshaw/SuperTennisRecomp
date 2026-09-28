@@ -1,0 +1,314 @@
+Subject: Separate exit analysis from AOT selection
+
+Add an interpret_only emission policy. Preserve normal exact exit proofs,
+keep all variants and mirrors interpreted, and reject legacy emission that
+cannot honor the policy. Verify both analyzers and cache invalidation.
+
+Co-authored-by: Codex <codex@openai.com>
+
+diff --git a/recompiler/v2/cfg_loader.py b/recompiler/v2/cfg_loader.py
+--- a/recompiler/v2/cfg_loader.py
++++ b/recompiler/v2/cfg_loader.py
+@@ -31,6 +31,9 @@
+ - `force_lle <pc24>` — keep an exact architectural function boundary on
+   the interpreter tier even when profile promotion or static reachability
+   would otherwise materialise it as native code.
++- `interpret_only <pc24>`: analyze reachable code and infer exits normally,
++  but exclude all entry variants and LoROM mirrors from manifest-driven AOT
++  emission. This does not add a root or declare an exit contract.
+ - `exclude_range <start> <end>` — data region carved out of decode.
+ - `data_region <bank> <start> <end>` — same idea, cross-bank.
+ 
+@@ -89,6 +92,8 @@
+     # rely on behavior (for example return-stack rewriting) that the native
+     # callable ABI cannot represent.
+     force_lle: set = field(default_factory=set)
++    # Analyze reachable code normally, but never materialize these addresses.
++    interpret_only: set = field(default_factory=set)
+     exclude_ranges: List[Tuple[int, int]] = field(default_factory=list)
+     data_regions: List[Tuple[int, int, int]] = field(default_factory=list)  # (bank, start, end)
+     # exit_mx_at directives: list of (bank, addr16, m, x) — annotates the
+@@ -386,19 +391,23 @@
+             # the interpreter tier. The address is deliberately absolute so
+             # a directive can live in a minimal bank00.cfg while naming any
+             # ROM bank discovered from a profile manifest.
+-            if head == 'force_lle':
++            if head in ('force_lle', 'interpret_only'):
+                 if len(tokens) != 2:
+                     raise ValueError(
+-                        f"{path}: force_lle needs <pc24>, got: {stripped!r}")
+-                try:
+-                    pc24 = _parse_hex(tokens[1]) & 0xFFFFFF
+-                except ValueError as e:
+-                    raise ValueError(
+-                        f"{path}: force_lle bad pc24 {tokens[1]!r}: {e}")
+-                if pc24 in cfg.force_lle:
+-                    raise ValueError(
+-                        f"{path}: force_lle duplicate boundary ${pc24:06X}")
+-                cfg.force_lle.add(pc24)
++                        f"{path}: {head} needs <pc24>, got: {stripped!r}")
++                try:
++                    pc24 = _parse_hex(tokens[1])
++                    if head == 'interpret_only' and not 0 <= pc24 <= 0xFFFFFF:
++                        raise ValueError('address must fit 24 bits')
++                    pc24 &= 0xFFFFFF
++                except ValueError as e:
++                    raise ValueError(
++                        f"{path}: {head} bad pc24 {tokens[1]!r}: {e}")
++                boundaries = getattr(cfg, head)
++                if pc24 in boundaries:
++                    raise ValueError(
++                        f"{path}: {head} duplicate boundary ${pc24:06X}")
++                boundaries.add(pc24)
+                 continue
+ 
+             # force_variant_at <site_pc24> <m> <x> — pin the variant
+diff --git a/recompiler/v2/program_emit.py b/recompiler/v2/program_emit.py
+--- a/recompiler/v2/program_emit.py
++++ b/recompiler/v2/program_emit.py
+@@ -404,8 +404,17 @@
+      templates_any, cfg_by_bank) = _cfg_name_maps(parsed)
+     entries_by_bank = defaultdict(list)
+     emitted = defaultdict(set)
++    # Emission policy is independent of exit analysis. These boundaries are
++    # decoded by either analyzer, including their normal proof dependencies,
++    # but always dispatch through the interpreter at every entry width.
++    interpreted = {pc for _bank, _path, cfg in parsed
++                   for pc in getattr(cfg, 'interpret_only', ())}
++    interpreted.update(mirror for pc in tuple(interpreted)
++                       if (mirror := _lorom_mirror_pc24(pc)) is not None)
+ 
+     for key, node in sorted(manifest.nodes.items()):
++        if key.pc24 in interpreted:
++            continue
+         bank = (key.pc24 >> 16) & 0xFF
+         cfg = _cfg_for_bank(cfg_by_bank, bank)
+         pc16 = key.pc24 & 0xFFFF
+diff --git a/recompiler-rs/src/cfg.rs b/recompiler-rs/src/cfg.rs
+--- a/recompiler-rs/src/cfg.rs
++++ b/recompiler-rs/src/cfg.rs
+@@ -110,6 +110,8 @@
+     pub symbols: Vec<NameDecl>,
+     /// Exact 24-bit executable function boundaries which must remain LLE.
+     pub force_lle: BTreeSet<u32>,
++    /// Emission-only exclusions. Reachable code still participates in analysis.
++    pub interpret_only: BTreeSet<u32>,
+     pub exclude_ranges: Vec<(u32, u32)>,
+     pub data_regions: Vec<(u32, u32, u32)>, // (bank, start, end)
+     pub reloc_regions: Vec<RelocRegion>,
+@@ -315,14 +317,22 @@
+             continue;
+         }
+         // force_lle <pc24>
+-        if head == "force_lle" {
++        if head == "force_lle" || head == "interpret_only" {
+             if tokens.len() != 2 {
+-                return Err(format!("{path}: force_lle needs <pc24>, got: {stripped:?}"));
+-            }
+-            let pc24 =
+-                parse_hex(tokens[1]).map_err(|e| format!("{path}: force_lle {e}"))? & 0xFFFFFF;
+-            if !cfg.force_lle.insert(pc24) {
+-                return Err(format!("{path}: force_lle duplicate boundary ${pc24:06X}"));
++                return Err(format!("{path}: {head} needs <pc24>, got: {stripped:?}"));
++            }
++            let raw = parse_hex(tokens[1]).map_err(|e| format!("{path}: {head} {e}"))?;
++            if head == "interpret_only" && raw > 0xFFFFFF {
++                return Err(format!("{path}: interpret_only address must fit 24 bits"));
++            }
++            let pc24 = raw & 0xFFFFFF;
++            let boundaries = if head == "force_lle" {
++                &mut cfg.force_lle
++            } else {
++                &mut cfg.interpret_only
++            };
++            if !boundaries.insert(pc24) {
++                return Err(format!("{path}: {head} duplicate boundary ${pc24:06X}"));
+             }
+             continue;
+         }
+@@ -1140,4 +1150,15 @@
+         assert_eq!(cfg.force_lle, BTreeSet::from([0x038DA0]));
+         assert!(parse_bank_cfg("bank = 00\nforce_lle 038DA0\nforce_lle 038DA0\n", "t").is_err());
+     }
+-}
++
++    #[test]
++    fn interpret_only_is_separate_from_force_lle() {
++        let cfg = parse_bank_cfg("bank = 00\ninterpret_only 038DA0\n", "t").unwrap();
++        assert_eq!(cfg.interpret_only, BTreeSet::from([0x038DA0]));
++        assert!(cfg.force_lle.is_empty());
++        for args in ["", "-1", "1000000", "038DA0 extra", "xyz",
++                     "038DA0\ninterpret_only 038DA0"] {
++            assert!(parse_bank_cfg(&format!("bank = 00\ninterpret_only {args}\n"), "t").is_err());
++        }
++    }
++}
+diff --git a/docs/CFG_EXIT_MODES.md b/docs/CFG_EXIT_MODES.md
+--- a/docs/CFG_EXIT_MODES.md
++++ b/docs/CFG_EXIT_MODES.md
+@@ -27,3 +27,27 @@
+ that a routine returns on every path, and it does not validate compiled timing.
+ Do not use it to hide an unresolved return convention or force compilation.
+ The legacy `exit_mx_at <pc24> <exit_m> <exit_x>` keeps its address-wide behavior.
++
++## Analyze code that remains interpreted
++
++`interpret_only <pc24>` is an emission policy for the manifest-driven pipeline.
++Reachable code and its dependencies still participate in the normal exit
++solver. The named address and its valid LoROM mirror have no AOT body at any
++entry width. This does not add a root, assert an exit width, or bypass an
++unresolved path. Exit proofs remain keyed by exact entry M/X.
++
++Use `force_lle` when analysis itself must stop at the boundary, for example
++when the callable boundary is unsafe to decode. It takes precedence if both
++directives name an address. Use `interpret_only` when the code is suitable for
++analysis but its generated execution has not passed validation. Apply it to
++each unvalidated dependency as well: it does not exclude an entire call tree.
++
++Both analyzers retain the same proof rules. The common emitter applies the
++selection after analysis, including when it consumes a native manifest.
++An analysis manifest can therefore mark an interpreted node `aot_eligible`;
++that means the analysis succeeded, not that a body was emitted. Read the
++emitter count or dispatch table to measure actual AOT coverage. An explicit
++emission exclusion also takes precedence over an HLE annotation.
++
++This directive is supported by `v2_emit.py`, not the legacy `v2_regen.py`
++emission path.
+diff --git a/tests/v2/test_interpret_only.py b/tests/v2/test_interpret_only.py
+new file mode 100644
+--- /dev/null
++++ b/tests/v2/test_interpret_only.py
+@@ -0,0 +1,110 @@
++"""Emission exclusions retain exact exit proofs, never create contracts."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++from _helpers import make_lorom_bank0
++from v2.program_analysis import VariantKey, NodeDisposition
++from v2.program_emit import build_emission_entries
++from v2.cfg_loader import load_bank_cfg
++
++REPO = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(REPO / 'tools'))
++from v2_analyze import _load_cfgs, build_manifest, build_manifest_native, native_analyzer_path
++
++CFG = ('bank = 00\nfunc Caller 8000 entry_mx:1,0\n'
++       'interpret_only 008200\ninterpret_only 008300\n')
++
++def fixture(path, unknown=False):
++    (path/'bank00.cfg').write_text(CFG)
++    # Two interpreted levels. The leaf changes M, so preservation is wrong.
++    rom = make_lorom_bank0({
++        0x8000: bytes([0x22, 0, 0x82, 0, 0xEA, 0x6B]),
++        0x8200: bytes([0x22, 0, 0x83, 0, 0x6B]),
++        0x8300: bytes([0x6C, 0, 0x10]) if unknown else bytes([0xC2, 0x20, 0x6B])})
++    roots = [VariantKey(pc, m, x) for pc in (0x008000, 0x808000, 0x808200, 0x808300)
++             for m in (0, 1) for x in (0, 1)]
++    return rom, roots
++
++
++def check(manifest, parsed):
++    _, emitted, *_ = build_emission_entries(manifest, parsed)
++    for bank in (0, 0x80):
++        for m in (0, 1):
++            for x in (0, 1):
++                for pc in (0x8200, 0x8300):
++                    key = VariantKey(bank << 16 | pc, m, x)
++                    assert manifest.exit_modes[key] == (0, x)
++                    assert key.pc24 not in emitted
++                assert (m, x) in emitted[bank << 16 | 0x8000]
++
++
++def test_interpret_only_proves_transitive_exits_for_both_analyzers():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw); rom, roots = fixture(p); parsed = _load_cfgs(p)
++        manifest = build_manifest(rom, parsed, max_insns=128, max_nodes=128,
++                                  additional_roots=roots)[0]
++        check(manifest, parsed)
++        if native_analyzer_path().is_file():
++            rp = p/'fixture.sfc'; rp.write_bytes(rom)
++            native = build_manifest_native(rom_path=rp, cfg_dir=p,
++                                           additional_roots=roots)[0]
++            check(native, parsed)
++            assert manifest.exit_modes == native.exit_modes
++
++
++def test_interpret_only_does_not_prove_unresolved_exits():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw); rom, roots = fixture(p, unknown=True)
++        manifest = build_manifest(rom, _load_cfgs(p), max_insns=128, max_nodes=128,
++                                  additional_roots=roots)[0]
++        assert not manifest.exit_modes
++        assert all(manifest.nodes[key].disposition == NodeDisposition.LLE_ONLY
++                   for key in roots if key.pc24 & 0xFFFF == 0x8000)
++        (p/'bank00.cfg').write_text(CFG + 'force_lle 008200\n')
++        blocked = build_manifest(rom, _load_cfgs(p), max_insns=128, max_nodes=128,
++                                 additional_roots=[k for k in roots if k.pc24 & 0xFFFF == 0x8000])[0]
++        assert all(k.pc24 & 0xFFFF not in (0x8200, 0x8300) for k in blocked.nodes)
++
++
++def test_interpret_only_validation():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw)/'bank00.cfg'
++        for text in ('', '-1', '1000000', '008200 extra', 'xyz',
++                     '008200\ninterpret_only 008200'):
++            p.write_text('bank = 00\ninterpret_only ' + text + '\n')
++            try:
++                load_bank_cfg(str(p))
++            except ValueError as exc:
++                assert 'interpret_only' in str(exc)
++            else:
++                raise AssertionError(text)
++
++
++def test_interpret_only_cache_and_null_dispatch():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw); cfg = p/'cfg';cfg.mkdir();rom,_ = fixture(cfg)
++        rp = p/'fixture.sfc';rp.write_bytes(rom);out=p/'generated'
++        cmd=[sys.executable,str(REPO/'tools/v2_emit.py'),'--rom',str(rp),
++             '--cfg-dir',str(cfg),'--out-dir',str(out),'--cfg-roots',
++             '--analysis-backend','python','--no-host-root-scan']
++        env={k:v for k,v in os.environ.items() if not k.startswith('SNESRECOMP_')}
++        legacy = [sys.executable, str(REPO/'tools/v2_regen.py'), '--rom', str(rp),
++                  '--cfg-dir', str(cfg), '--out-dir', str(p/'legacy')]
++        rejected = subprocess.run(legacy, env=env, text=True, capture_output=True)
++        assert rejected.returncode != 0
++        assert 'interpret_only requires manifest-driven' in rejected.stderr
++        assert not (p/'legacy/dispatch_v2.c').exists()
++        def run():
++            r=subprocess.run(cmd,env=env,text=True,capture_output=True)
++            assert r.returncode==0,r.stdout+r.stderr
++            return r.stdout,(out/'dispatch_v2.c').read_text()
++        _,a=run()
++        assert 'bank_00_8200_M1X0' not in a and 'bank_00_8300_M1X0' not in a
++        assert 'reused verified published output' in run()[0]
++        (cfg/'bank00.cfg').write_text(CFG.replace('interpret_only 008200\n',''))
++        log,b=run()
++        assert 'reused verified published output' not in log
++        assert 'bank_00_8200_M1X0' in b and 'bank_00_8300_M1X0' not in b
+diff --git a/tests/v2/run_tests.py b/tests/v2/run_tests.py
+--- a/tests/v2/run_tests.py
++++ b/tests/v2/run_tests.py
+@@ -58,6 +58,7 @@
+     'test_indexed_addressing_bank_carry',
+     'test_exit_mx_autoroute',
+     'test_exact_exit_contracts',
++    'test_interpret_only',
+     'test_prune_unresolved_indirect_goto',
+     'test_atomic_output',
+     'test_translation_units',
+diff --git a/tools/v2_regen.py b/tools/v2_regen.py
+--- a/tools/v2_regen.py
++++ b/tools/v2_regen.py
+@@ -1202,6 +1202,8 @@
+         except Exception as e:
+             print(f"  PARSE-FAIL bank ${bank:02X}: {type(e).__name__}: {e}")
+             continue
++        if cfg.interpret_only:
++            p.error('interpret_only requires manifest-driven tools/v2_emit.py')
+         parsed.append((bank, cfg_path, cfg))
+         for entry in cfg.entries:
+             if entry.name:

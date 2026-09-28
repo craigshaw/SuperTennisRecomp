@@ -55,9 +55,9 @@ a reproducible private product; do not weaken `.gitignore` to publish it.
 ## Working loop
 
 1. Initialize and patch the submodule with
-   `sh tools/apply-snesrecomp-patches.sh`. The current pin already
-   includes all 22 required patches, so normal setup only verifies its files.
-   Older supported revisions can use the exported patches for recovery.
+   `sh tools/apply-snesrecomp-patches.sh`. The current pin includes
+   patches 0001 through 0026. Normal setup verifies all required files. Older supported revisions use the exported
+   patches for recovery.
 2. Regenerate from the user's ROM with
    `sh tools/regenerate.sh /path/to/rom.sfc`.
 3. Build with `sh build.sh`.

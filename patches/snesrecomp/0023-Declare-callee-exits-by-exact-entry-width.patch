@@ -1,0 +1,461 @@
+Subject: Declare callee exits by exact entry width
+
+Add exit_mx_for to both cfg parsers and analyzers. Keep explicit facts
+separate from inferred routes and preserve them across regeneration.
+Test exact callers, mirrors, override scope, refresh and cache invalidation.
+
+Co-authored-by: Codex <codex@openai.com>
+
+diff --git a/recompiler-rs/src/bin/analyze.rs b/recompiler-rs/src/bin/analyze.rs
+index 81daa04..509569d 100644
+--- a/recompiler-rs/src/bin/analyze.rs
++++ b/recompiler-rs/src/bin/analyze.rs
+@@ -369,6 +369,16 @@ fn load_inputs(cfg_dir: &Path, rom: &mut Vec<u8>, all_cfg_roots: bool) -> Result
+         }
+     }
+ 
++    // Exact declarations refine broadcast hints regardless of cfg file order.
++    for cfg in &cfgs {
++        for &(exit_bank, pc, m, x, exit_m, exit_x) in &cfg.exit_mx_for {
++            let target = ((exit_bank as u32) << 16) | pc;
++            for resolved in [Some(target), mirror_pc24(target)].into_iter().flatten() {
++                declared_exit_modes.insert((resolved, m, x), (exit_m, exit_x));
++            }
++        }
++    }
++
+     // Reloc regions: any cfg `reloc` directives, plus a synthetic region per
+     // `ram_routine` whose blob bytes are appended to the ROM image at a
+     // $8000-aligned offset. Redirecting the WRAM entry to a plain LoROM
+diff --git a/recompiler-rs/src/cfg.rs b/recompiler-rs/src/cfg.rs
+index 12a3eb9..2675833 100644
+--- a/recompiler-rs/src/cfg.rs
++++ b/recompiler-rs/src/cfg.rs
+@@ -115,6 +115,8 @@ pub struct BankCfg {
+     pub reloc_regions: Vec<RelocRegion>,
+     pub ram_routines: Vec<RamRoutine>,
+     pub exit_mx_at: Vec<(u8, u32, u8, u8)>, // (bank, addr16, m, x)
++    /// Explicit (bank, addr16, entry M, entry X, exit M, exit X) contracts.
++    pub exit_mx_for: Vec<(u8, u32, u8, u8, u8, u8)>,
+     pub exit_mx_at_per_variant: Vec<(u8, u32, u8, u8, u8, u8)>,
+     pub auto_vectors: bool,
+     pub indirect_dispatch: Vec<IndirectDispatch>,
+@@ -725,6 +727,22 @@ pub fn parse_bank_cfg(text: &str, path: &str) -> Result<BankCfg, String> {
+             }
+             continue;
+         }
++        // exit_mx_for <hex_pc24> <entry_m> <entry_x> <exit_m> <exit_x>
++        if head == "exit_mx_for" {
++            if tokens.len() != 6 {
++                return Err(format!("{path}: exit_mx_for needs an address and four width bits"));
++            }
++            let addr = parse_hex(tokens[1])
++                .map_err(|e| format!("{path}: invalid exit_mx_for address: {e}"))?;
++            let widths: Result<Vec<u8>, _> = tokens[2..].iter().map(|s| s.parse()).collect();
++            let widths = widths.map_err(|e| format!("{path}: invalid exit_mx_for widths: {e}"))?;
++            if addr > 0xFFFFFF || widths.iter().any(|&bit| bit > 1) {
++                return Err(format!("{path}: exit_mx_for address or width bit out of range"));
++            }
++            cfg.exit_mx_for.push(((addr >> 16) as u8, addr & 0xFFFF,
++                widths[0], widths[1], widths[2], widths[3]));
++            continue;
++        }
+         // exit_mx_at <hex_24bit_addr> <m> <x>
+         if head == "exit_mx_at" && tokens.len() >= 4 {
+             if let (Ok(addr_24), Ok(m_val), Ok(x_val)) = (
+@@ -883,6 +901,18 @@ fn parse_int_auto(tok: &str) -> Result<i64, std::num::ParseIntError> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn exact_exit_contracts_validate_bits_and_preserve_entry_scope() {
++        let cfg = parse_bank_cfg("bank = 00\nexit_mx_for 018200 1 0 0 1\n", "t").unwrap();
++        assert_eq!(cfg.exit_mx_for, vec![(1, 0x8200, 1, 0, 0, 1)]);
++        assert!(cfg.exit_mx_at.is_empty());
++        assert!(cfg.exit_mx_at_per_variant.is_empty());
++        for args in ["008200 2 0 1 0", "008200 1 0 -1 0", "1008200 1 0 1 0",
++                     "008200 1 0 1", "008200 1 0 1 0 extra"] {
++            assert!(parse_bank_cfg(&format!("bank = 00\nexit_mx_for {args}\n"), "t").is_err());
++        }
++    }
++
+     #[test]
+     fn missing_bank_errors() {
+         assert!(parse_bank_cfg("func Foo 8000\n", "t").is_err());
+diff --git a/recompiler/v2/cfg_loader.py b/recompiler/v2/cfg_loader.py
+index 0ddd74d..9a46ec5 100644
+--- a/recompiler/v2/cfg_loader.py
++++ b/recompiler/v2/cfg_loader.py
+@@ -101,6 +101,10 @@ class BankCfg:
+     # backward compat with hand-written hints that pre-date the
+     # per-variant work.
+     exit_mx_at: List[Tuple[int, int, int, int]] = field(default_factory=list)
++    # Explicit exact-entry contracts. Kept separate from inferred routes so
++    # an autoroute refresh cannot discard a declared fact.
++    # (bank, addr16, entry_m, entry_x, exit_m, exit_x)
++    exit_mx_for: List[Tuple[int, int, int, int, int, int]] = field(default_factory=list)
+     # Per-entry-variant exit (m, x) tuples populated by the auto-router.
+     # Each entry is (bank, addr16, entry_m, entry_x, exit_m, exit_x).
+     # Consumed by v2_regen.py's callee_exit_mx builder; per-variant
+@@ -762,6 +766,22 @@ def load_bank_cfg(path: str) -> BankCfg:
+                 cfg.exclude_ranges.append((s, e))
+                 continue
+ 
++            # exit_mx_for <hex_pc24> <entry_m> <entry_x> <exit_m> <exit_x>
++            if head == 'exit_mx_for':
++                try:
++                    if len(tokens) != 6:
++                        raise ValueError('expected an address and four width bits')
++                    addr_24 = _parse_hex(tokens[1])
++                    widths = tuple(int(value) for value in tokens[2:])
++                    if not 0 <= addr_24 <= 0xFFFFFF or any(
++                            value not in (0, 1) for value in widths):
++                        raise ValueError('address or width bit out of range')
++                except ValueError as exc:
++                    raise ValueError(f'{path}: invalid exit_mx_for: {stripped!r}') from exc
++                cfg.exit_mx_for.append(
++                    (addr_24 >> 16, addr_24 & 0xFFFF, *widths))
++                continue
++
+             # exit_mx_at <hex_24bit_addr> <m> <x>
+             #
+             # Stand-alone callee-exit-(m,x) annotation. Records that the
+diff --git a/recompiler/v2/exit_mx_autoroute.py b/recompiler/v2/exit_mx_autoroute.py
+index 80fd1ec..0054ecf 100644
+--- a/recompiler/v2/exit_mx_autoroute.py
++++ b/recompiler/v2/exit_mx_autoroute.py
+@@ -232,6 +232,14 @@ def detect_and_route(parsed, rom: bytes,
+                 callee_exit_mx[key] = (m_val & 1, x_val & 1)
+                 seeded_keys.add(key)
+ 
++    # Exact declarations override broadcast hints only for their entry key.
++    # Preserve them across inferred-route refreshes, including preserving exits.
++    for _bank, _cfg_path, cfg in parsed:
++        for b_id, addr16, em, ex, exit_m, exit_x in getattr(cfg, 'exit_mx_for', ()):
++            key = ((b_id << 16) | addr16, em, ex)
++            callee_exit_mx[key] = (exit_m, exit_x)
++            seeded_keys.add(key)
++
+     # Iterative fixpoint with re-derivation. Each pass walks every
+     # cfg entry × every (em, ex); decodes under the current
+     # callee_exit_mx; updates the entry if the derived exit differs
+diff --git a/tests/v2/run_tests.py b/tests/v2/run_tests.py
+index dabd45b..5bfc210 100644
+--- a/tests/v2/run_tests.py
++++ b/tests/v2/run_tests.py
+@@ -57,6 +57,7 @@ TEST_MODULES = [
+     'test_emit_function_tail_call_past_end',
+     'test_indexed_addressing_bank_carry',
+     'test_exit_mx_autoroute',
++    'test_exact_exit_contracts',
+     'test_prune_unresolved_indirect_goto',
+     'test_atomic_output',
+     'test_translation_units',
+diff --git a/tools/v2_analyze.py b/tools/v2_analyze.py
+index 99872af..ab6d66d 100644
+--- a/tools/v2_analyze.py
++++ b/tools/v2_analyze.py
+@@ -462,6 +462,13 @@ def _declared_exit_modes(parsed) -> dict:
+                         result.setdefault(
+                             (resolved_target, entry_m, entry_x),
+                             (entry_m, entry_x))
++    # Apply exact declarations last, independent of the cfg file order.
++    # They refine legacy address-wide contracts without widening entry state.
++    for _bank_id, _path, cfg in parsed:
++        for bank, pc, entry_m, entry_x, exit_m, exit_x in cfg.exit_mx_for:
++            target = (bank << 16) | pc
++            for resolved_target in targets_with_mirror(target):
++                result[(resolved_target, entry_m, entry_x)] = (exit_m, exit_x)
+     return result
+ 
+ 
+diff --git a/tools/v2_regen.py b/tools/v2_regen.py
+index 3a60423..1edcb74 100644
+--- a/tools/v2_regen.py
++++ b/tools/v2_regen.py
+@@ -766,6 +766,11 @@ def _rebuild_callee_exit_mx(parsed, variants: dict) -> tuple:
+                 ex_m & 1, ex_xf & 1)
+             per_variant_count += 1
+ 
++    for _bank, _cfg_path, cfg in parsed:
++        for b_id, addr16, em, ex, exit_m, exit_x in cfg.exit_mx_for:
++            callee_exit_mx[((b_id << 16) | addr16, em, ex)] = (exit_m, exit_x)
++            per_variant_count += 1
++
+     return (
+         callee_exit_mx,
+         cfg_exit_mx_count,
+@@ -1681,50 +1686,13 @@ def main() -> int:
+     # we have a more principled inference (e.g. CFG-aware path
+     # analysis, or per-edge propagation that doesn't rely on the same
+     # decoder used for emit).
+-    callee_exit_mx: dict = {}
+-    cfg_exit_mx_count = 0
+-    declared_exit_mx: dict = {}  # (bank, addr16) -> (m, x)
+-    # Collect from `exit_mx_at <bankaddr16> <m> <x>` cfg directives
+-    # across all banks. This is the standalone form — independent of
+-    # any `func` entry, so callees discovered only via auto-promote
+-    # (e.g. $00:F461 — reached via JSR but with no own `func` line)
+-    # can still carry the annotation.
+-    for bank, _cfg_path, cfg in parsed:
+-        for (b_id, addr16, m_val, x_val) in cfg.exit_mx_at:
+-            declared_exit_mx[(b_id & 0xFF, addr16 & 0xFFFF)] = (m_val, x_val)
+-    # Broadcast each declared exit_mx to ALL (m, x) variants at the
+-    # target address. Variants are the discovered set in `variants`.
+-    for (b_id, addr16), (ex_m, ex_xf) in declared_exit_mx.items():
+-        target_pc24 = (b_id << 16) | addr16
+-        mx_set = variants.get(target_pc24)
+-        if mx_set:
+-            for em, ex2 in mx_set:
+-                callee_exit_mx[(target_pc24, em, ex2)] = (ex_m, ex_xf)
+-                cfg_exit_mx_count += 1
+-        else:
+-            # No discovered variants — apply to cfg-default (1, 1).
+-            callee_exit_mx[(target_pc24, 1, 1)] = (ex_m, ex_xf)
+-            cfg_exit_mx_count += 1
+-
+-    # Per-variant exit_mx_at: populated by the auto-router with one
+-    # (entry_m, entry_x) → (exit_m, exit_x) tuple per mutating variant.
+-    # Per-variant entries OVERRIDE the broadcast 4-tuple at the same
+-    # (target, em, ex) key — but cfg-declared 4-tuples are seeded by
+-    # the auto-router itself before its own analysis runs, so hand-
+-    # written hints stay authoritative.
+-    per_variant_count = 0
+-    for bank, _cfg_path, cfg in parsed:
+-        for (b_id, addr16, em_in, ex_in, ex_m, ex_xf) in \
+-                cfg.exit_mx_at_per_variant:
+-            target_pc24 = ((b_id & 0xFF) << 16) | (addr16 & 0xFFFF)
+-            callee_exit_mx[(target_pc24, em_in & 1, ex_in & 1)] = (
+-                ex_m & 1, ex_xf & 1)
+-            per_variant_count += 1
++    callee_exit_mx, cfg_exit_mx_count, declared_exit_count, per_variant_count = (
++        _rebuild_callee_exit_mx(parsed, variants))
+ 
+     if cfg_exit_mx_count or per_variant_count:
+         print()
+         print(f"Loaded {cfg_exit_mx_count} cfg `exit_mx_at` broadcast "
+-              f"annotations ({len(declared_exit_mx)} unique targets); "
++              f"annotations ({declared_exit_count} unique targets); "
+               f"{per_variant_count} per-variant overrides")
+ 
+     # Capture cfg-declared (canonical) variants BEFORE the clone step.
+@@ -2353,32 +2321,8 @@ def main() -> int:
+             cfg2.exit_mx_at_per_variant.clear()
+         refreshed_exit_mx_fixes = autoroute_exit_mx(
+             parsed, rom, dispatch_helpers=dispatch_helpers)
+-        callee_exit_mx = {}
+-        cfg_exit_mx_count = 0
+-        declared_exit_mx = {}
+-        for _bank2, _cfg_path2, cfg2 in parsed:
+-            for (b_id, addr16, m_val, x_val) in cfg2.exit_mx_at:
+-                declared_exit_mx[(b_id & 0xFF, addr16 & 0xFFFF)] = (
+-                    m_val, x_val)
+-        for (b_id, addr16), (ex_m, ex_xf) in declared_exit_mx.items():
+-            target_pc24 = (b_id << 16) | addr16
+-            mx_set = variants.get(target_pc24)
+-            if mx_set:
+-                for em, ex2 in mx_set:
+-                    callee_exit_mx[(target_pc24, em, ex2)] = (
+-                        ex_m, ex_xf)
+-                    cfg_exit_mx_count += 1
+-            else:
+-                callee_exit_mx[(target_pc24, 1, 1)] = (ex_m, ex_xf)
+-                cfg_exit_mx_count += 1
+-        per_variant_count = 0
+-        for _bank2, _cfg_path2, cfg2 in parsed:
+-            for (b_id, addr16, em_in, ex_in, ex_m, ex_xf) in \
+-                    cfg2.exit_mx_at_per_variant:
+-                target_pc24 = ((b_id & 0xFF) << 16) | (addr16 & 0xFFFF)
+-                callee_exit_mx[(target_pc24, em_in & 1, ex_in & 1)] = (
+-                    ex_m & 1, ex_xf & 1)
+-                per_variant_count += 1
++        callee_exit_mx, cfg_exit_mx_count, declared_exit_count, per_variant_count = (
++            _rebuild_callee_exit_mx(parsed, variants))
+         callee_exit_mx_modes = _build_callee_exit_mx_modes(callee_exit_mx)
+         exit_mx_rescan_all = True
+         print(
+diff --git a/docs/CFG_EXIT_MODES.md b/docs/CFG_EXIT_MODES.md
+new file mode 100644
+index 0000000..e55a877
+--- /dev/null
++++ b/docs/CFG_EXIT_MODES.md
+@@ -0,0 +1,29 @@
++# Declared callee exit widths
++
++Use `exit_mx_for <pc24> <entry_m> <entry_x> <exit_m> <exit_x>` to declare
++one exact callee entry and its return widths. Addresses are hexadecimal;
++width flags are decimal `0` or `1`. A set flag selects eight-bit registers.
++
++For example, this synthetic declaration applies only to entry M1X0:
++
++```text
++exit_mx_for 018200 1 0 0 0
++```
++
++The Python and native whole-program analyzers also apply that exact entry
++contract to a valid LoROM mirror, under their existing mapping rule. They do
++not create exit facts for other entry widths. The declaration is independent
++of `func` and `force_lle`: an interpreted callee can have a known exit without
++becoming an AOT body. Unknown entry variants keep their existing fallback.
++
++Exact declarations take precedence over the legacy address-wide `exit_mx_at`
++directive and inferred exits. Keep explicit facts separate from inferred
++routes so analysis refreshes cannot erase them. The legacy regeneration path
++also preserves exact declarations across auto-promotion and exit inference.
++Changing the cfg invalidates the normal emitted-output cache.
++
++Use evidence or sound static analysis to establish the contract. Observing
++one entry width does not support other widths. A declaration does not prove
++that a routine returns on every path, and it does not validate compiled timing.
++Do not use it to hide an unresolved return convention or force compilation.
++The legacy `exit_mx_at <pc24> <exit_m> <exit_x>` keeps its address-wide behavior.
+diff --git a/tests/v2/test_exact_exit_contracts.py b/tests/v2/test_exact_exit_contracts.py
+new file mode 100644
+index 0000000..852ea91
+--- /dev/null
++++ b/tests/v2/test_exact_exit_contracts.py
+@@ -0,0 +1,144 @@
++"""Exact entry-width contracts must not create facts for unobserved variants."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++
++from _helpers import make_lorom_bank0
++from v2.cfg_loader import load_bank_cfg
++from v2.exit_mx_autoroute import detect_and_route
++from v2.program_analysis import NodeDisposition, VariantKey
++
++REPO = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(REPO / 'tools'))
++from v2_analyze import _load_cfgs, _declared_exit_modes, build_manifest, build_manifest_native, native_analyzer_path
++from v2_regen import _rebuild_callee_exit_mx
++
++CFG = ('bank = 00\nfunc Caller 8000 end:8006 entry_mx:1,0\n'
++       'func Callee 8200 end:8201 entry_mx:1,0\nforce_lle 008200\n')
++ROM = make_lorom_bank0({0x8000: bytes([0x22, 0x00, 0x82, 0x00, 0xEA, 0x6B]),
++                        0x8200: bytes([0x6B])})
++
++
++def test_exact_contract_parser_rejects_invalid_widths_and_addresses():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw) / 'bank00.cfg'
++        for args in ['008200 2 0 1 0', '008200 1 0 -1 0',
++                     '1008200 1 0 1 0', '-1 1 0 1 0',
++                     '008200 1 0 1', '008200 1 0 1 0 extra',
++                     '008200 x 0 1 0']:
++            p.write_text(CFG + 'exit_mx_for ' + args + '\n')
++            try:
++                load_bank_cfg(str(p))
++            except ValueError as exc:
++                assert 'exit_mx_for' in str(exc)
++            else:
++                raise AssertionError(args)
++
++
++def _analyze(directory, suffix, native=False):
++    cfg = directory / 'bank00.cfg'
++    cfg.write_text(CFG + suffix)
++    roots = [VariantKey(pc, m, x) for pc in (0x008000, 0x808000)
++             for m in (0, 1) for x in (0, 1)]
++    if native:
++        rom_path = directory / 'fixture.sfc'
++        rom_path.write_bytes(ROM)
++        return build_manifest_native(rom_path=rom_path, cfg_dir=directory,
++                                     additional_roots=roots)[0]
++    return build_manifest(ROM, _load_cfgs(directory), max_insns=128, max_nodes=128,
++                          additional_roots=roots)[0]
++
++
++def _check_exact_scope(manifest):
++    for pc in (0x008200, 0x808200):
++        for m in (0, 1):
++            for x in (0, 1):
++                key = VariantKey(pc, m, x)
++                assert (key in manifest.exit_modes) == ((m, x) == (1, 0))
++                assert key not in manifest.nodes  # force_lle still applies.
++    for pc in (0x008000, 0x808000):
++        for m in (0, 1):
++            for x in (0, 1):
++                node = manifest.nodes[VariantKey(pc, m, x)]
++                assert (node.disposition == NodeDisposition.AOT_ELIGIBLE) == ((m, x) == (1, 0))
++
++
++def test_exact_contract_unlocks_only_matching_callers_and_mirrors():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw)
++        baseline = _analyze(p, '')
++        assert all(n.disposition == NodeDisposition.LLE_ONLY for n in baseline.nodes.values())
++        candidate = _analyze(p, 'exit_mx_for 008200 1 0 1 0\n')
++        _check_exact_scope(candidate)
++
++
++def test_native_exact_contract_matches_python():
++    if not native_analyzer_path().is_file():
++        return
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw)
++        exact = 'exit_mx_for 008200 1 0 1 0\n'
++        python = _analyze(p, exact)
++        native = _analyze(p, exact, native=True)
++        _check_exact_scope(native)
++        assert native.exit_modes == python.exit_modes
++        assert native.roots == python.roots
++
++
++def test_exact_contract_overrides_broadcast_across_cfg_order():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw)
++        (p / 'bank00.cfg').write_text(CFG + 'exit_mx_for 008200 1 0 0 0\n')
++        (p / 'bank01.cfg').write_text('bank = 01\nexit_mx_at 008200 1 1\n')
++        modes = _declared_exit_modes(_load_cfgs(p))
++        for pc in (0x008200, 0x808200):
++            assert modes[(pc, 1, 0)] == (0, 0)
++            assert modes[(pc, 0, 0)] == (1, 1)
++            assert modes[(pc, 1, 1)] == (1, 1)
++
++
++def test_exact_contract_survives_autoroute_refresh():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw)
++        (p / 'bank00.cfg').write_text(CFG + 'exit_mx_for 008200 1 0 0 0\n')
++        parsed = _load_cfgs(p)
++        cfg = parsed[0][2]
++        for _ in range(2):
++            cfg.exit_mx_at_per_variant.clear()
++            detect_and_route(parsed, ROM)
++            modes, *_counts = _rebuild_callee_exit_mx(parsed, {0x008200: {(1, 0), (0, 0)}})
++            assert modes[(0x008200, 1, 0)] == (0, 0)
++            assert cfg.exit_mx_for == [(0, 0x8200, 1, 0, 0, 0)]
++            assert all(route[2:4] != (1, 0) for route in cfg.exit_mx_at_per_variant
++                       if route[:2] == (0, 0x8200))
++
++
++def test_exact_contract_changes_invalidate_published_output_cache():
++    with tempfile.TemporaryDirectory() as raw:
++        p = Path(raw); cfg = p / 'cfg'; cfg.mkdir()
++        rom = p / 'fixture.sfc'; rom.write_bytes(ROM)
++        path = cfg / 'bank00.cfg'; path.write_text(CFG)
++        out = p / 'generated'
++        cmd = [sys.executable, str(REPO / 'tools/v2_emit.py'), '--rom', str(rom),
++               '--cfg-dir', str(cfg), '--out-dir', str(out), '--cfg-roots',
++               '--analysis-backend', 'python', '--no-host-root-scan']
++        env = {k: v for k, v in os.environ.items() if not k.startswith('SNESRECOMP_')}
++        def run():
++            r = subprocess.run(cmd, env=env, text=True, capture_output=True)
++            assert r.returncode == 0, r.stdout + r.stderr
++            return r.stdout, json.loads((out / 'program_manifest.json').read_text())
++        _, before = run()
++        assert before['nodes']['008000:M1X0']['disposition'] == 'lle_only'
++        path.write_text(CFG + 'exit_mx_for 008200 1 0 1 0\n')
++        log, after = run()
++        assert 'reused verified published output' not in log
++        assert after['nodes']['008000:M1X0']['disposition'] == 'aot_eligible'
++        assert 'reused verified published output' in run()[0]
++        path.write_text(CFG + 'exit_mx_for 008200 0 0 1 0\n')
++        log, restored = run()
++        assert 'reused verified published output' not in log
++        assert restored['nodes']['008000:M1X0']['disposition'] == 'lle_only'
++        assert '008200:M1X0' not in restored['exit_modes']
