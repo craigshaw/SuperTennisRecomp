@@ -48,6 +48,7 @@ def main():
     # not add cfg functions or assert new exit widths.
     env["SNESRECOMP_EMIT_CONTINUATIONS"] = ",".join((
         "01E5DF:1:0>01E695:1:0", "01E72F:1:0>01E7E5:1:0",
+        "01EBAE:1:0>01EC64:1:0", "01ECCB:1:0>01ED81:1:0",
     ))
     # Preserve the validated bulk and recovery selections.
     # Global bus timing stays disabled.

@@ -35,9 +35,11 @@ it introduces no further runtime source changes.
 
 Patch 0031 adds opt-in scheduler continuations for existing instruction-timed
 blocks. It keeps continuation lookup separate from subroutine dispatch and
-analysis roots. The title selects two balanced loop headers in `01E5DF` and
-`01E72F`; its normal analyzer manifest is unchanged. The Python v2 suite,
-shared C suite, focused continuation/cache tests and both title replays pass.
+analysis roots. The title selects four balanced loop headers in `01E5DF`,
+`01E72F`, `01EBAE` and `01ECCB`; its normal analyzer manifest is unchanged.
+The original shared change passed the Python v2 suite, shared C suite and
+focused continuation/cache tests. The later selection-only change reuses
+those checks and passes both title replay comparisons.
 See [AOT_RECOVERY.md](AOT_RECOVERY.md) for measured work and remaining limits.
 
 ## Ordered series
@@ -135,9 +137,9 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
-and selects 32 exact entries for instruction timing, including the four
-frequent roots validated in the latest recovery batch.
-The normal output has 339 AOT bodies. The bus-cost selection contains 170
+and selects 38 exact entries for instruction timing. It also selects four
+validated internal scheduler continuations, separate from function roots.
+The normal output has 345 AOT bodies. The bus-cost selection contains 170
 exact keys, of which 136 emit bodies with corrected costs and block timing.
 The other 34 remain interpreted under the validated cfg exclusions and exit
 proofs. Preserve this selection with the cfg; see [the recovery report](AOT_RECOVERY.md).

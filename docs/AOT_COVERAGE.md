@@ -85,7 +85,20 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 345 variants and two continuations
+## Accepted normal-build checkpoint: 345 variants and four continuations
+
+The second 29 September continuation selection adds `01EC64:M1X0` inside
+`01EBAE:M1X0` and `01ED81:M1X0` inside `01ECCB:M1X0`. Direct traces confirm
+NMI deadline handoffs. The unchanged generator validates both existing loop
+entries, and both execute in the long replay. The change removes another
+414,547 interpreted instructions, or 3.25% overall, recovering 99.55% of the
+two graphs' remaining interpreted work. Fresh normal generation reproduces
+the candidate; both saved replay comparisons and the neutral check pass.
+Three normal-build pairs suggest 1.14% less local wall time. Shared source
+is unchanged and its passing suites are reused. See
+[AOT_RECOVERY.md](AOT_RECOVERY.md) for evidence and limits.
+
+## Previous checkpoint: 345 variants and two continuations
 
 The 29 September continuation change recovers execution inside existing
 instruction-timed bodies. `01E695:M1X0` and `01E7E5:M1X0` are validated internal

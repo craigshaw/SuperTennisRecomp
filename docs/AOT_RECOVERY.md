@@ -1,12 +1,97 @@
 # AOT recovery
 
-The accepted normal build generates **345 AOT bodies**, with two validated
-scheduler continuation entries. The previous checkpoint is title `b28a41e`
-with snesrecomp `f4451a3`. The new shared pin is `03c2c23`, described in
+The accepted normal build generates **345 AOT bodies**, with four validated
+scheduler continuation entries. The previous checkpoint is title `ab3c2a7`.
+The shared pin remains `03c2c23`, described in
 `SNESRECOMP_PATCHES.md`. This report supersedes the older handoff in
 `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: resume compiled loops after events, 29 September 2026
+## Latest checkpoint: resume the two ALU loops, 29 September 2026
+
+### Observed cause and selected entries
+
+The bounded direct-entry trace confirms deadline handoffs in both remaining
+instruction-timed callers. `01EBAE:M1X0` yields at frame 84 at `01EC86:M1X0`,
+S=`0FF9`, master clock 29968450 against deadline 29968444. `01ECCB:M1X0`
+yields at frame 86 at `01ED86:M0X0`, S=`0FF9`, clock and deadline 30683180.
+Both transfers are marked as NMI deadlines. The following frames include
+the NMI handler and interpreted loop entries `01EC64:M1X0` and
+`01ED81:M1X0`, respectively, at the same S as their root entry. The corrected
+300-frame diagnostic replay matches its saved control. The two traces end
+when the guest stack rises above the root entry S.
+
+The first probe did not clear its root label after a normal compiled return.
+It therefore misattributed a later helper yield to `01ECCB`. Its raw output
+is retained but rejected. The corrected probe wraps both direct compiled
+entries and records their returns; only that capture supports the claims above.
+
+Normal generation now also selects `01EBAE:1:0>01EC64:1:0` and
+`01ECCB:1:0>01ED81:1:0`. These existing CFG loop entries pass the unchanged
+generator checks for exact widths, zero local stack depth and no predecessor
+IR temporaries. This is a static safety check, followed by observed replay
+validation. There is no cfg edit, new function root, exit-width declaration,
+or shared compiler/runtime change. The normal Python analyzer manifest stays
+byte identical and passes the lab manifest reader. Existing Mesen exit
+evidence remains valid; this selection adds no independent hardware claim.
+
+### Measured result and validation
+
+The clean candidate passes the 4,816-frame long replay. Its frame comparison
+file is byte identical to the accepted control, with zero bailouts, tuple
+overflow or journal failures. The new entries commit guest CPU work on 71
+and 80 invocations. The two existing entries retain their counts of 142 and
+139. Interpreted work changes as follows:
+
+| Exact routine graph | Before | After |
+| --- | ---: | ---: |
+| `01EBAE:M1X0` | 170,273 | 756 |
+| `01ECCB:M1X0` | 246,143 | 1,113 |
+| Whole long replay | 12,739,575 | 12,325,028 |
+
+This removes **414,547 interpreted instructions, or 3.25% overall**, and
+1,634,803 interpreted CPU cycles. It recovers **99.55%** of the remaining
+interpreted work in the two target graphs. The earlier continuation pair's
+remaining counts are unchanged. The accepted selection has **345 bodies,
+38 instruction-timing entries and four separate continuation entries**.
+
+Fresh normal cfg-only generation emits all five banks without cache reuse
+and reproduces all seven candidate C files and the full manifest. The desktop
+and headless builds pass. A harness linked to the normal generated library
+passes the second, 2,125-frame primary replay with an identical frame file
+and zero capture diagnostics. The normal headless 180-frame neutral check,
+seven workflow checks, 31 patch checks, publication boundary and whitespace
+checks pass. Shared source is unchanged, so the accepted shared C and Python
+v2 suites are reused instead of repeated.
+
+Three alternating rendered pairs of normal builds, after one warm-up each,
+average 3.46647 seconds for the control and 3.42682 seconds for the candidate.
+All three improve and their final images match. This suggests **1.14% less
+local wall time**; it is a short measurement, not a sustained frame-rate claim.
+
+### Evidence, limits and next step
+
+Private evidence is in `captures/aot-alu-resume-20260929`, indexed by
+`captures/aot-alu-resume-current.txt` and a follow-up record reached through
+`captures/aot-recovery-current.txt`. It contains the preserved baseline,
+rejected and corrected probes, clean candidate, exact continuation counts,
+cost profiles, proposal review, fresh normal comparison and benchmark.
+No bulk screen, full compiler suites, five-replay sweep, native analyzer
+rebuild, new Mesen capture, Windows build or manual gameplay was repeated.
+The unrelated UI file and lab work log remain untouched.
+
+Do not chase the residual 1,869 instructions in this pair without evidence
+of a useful benefit. The current profile confirms **3,183,161 interpreted
+instructions** in the union of the six overlapping bank-00 graphs `00CE3F`,
+`00CFE8`, `00D0DE`, `00D271`, `00D285` and `00D2A0`. This is about 25.8% of
+the remaining interpreted work, not a predicted saving. Reuse the saved
+membership map and classification of 515 unadopted bodies. The next bounded
+task is to inspect operation and call blockers in this group, then choose
+the smallest useful instruction-timing conversion and necessary dependencies.
+Only add continuation selections after their generated blocks pass the
+existing checks. Do not rescreen all bodies or reopen the parked `00804D`
+prefix. Expand shared tests only if shared implementation changes.
+
+## Previous checkpoint: resume compiled loops after events, 29 September 2026
 
 ### Observed cause and bounded change
 
