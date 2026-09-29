@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-from instrument import FRAME_HEADER, bridge, generated, host, interpreter
+from instrument import FRAME_HEADER, bridge, generated, host, interpreter, host_cost
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -129,6 +129,17 @@ def preflight(config):
                 raise ValueError('invalid selection key')
     if not re.fullmatch(r'[a-zA-Z0-9_-]{1,64}', config.get('cache', 'default')):
         raise ValueError('invalid cache name')
+    groups = config.get('host_cost', {})
+    seen = set()
+    if len(groups) > 16:
+        raise ValueError('at most 16 host cost groups')
+    for name, keys in groups.items():
+        if not re.fullmatch(r'[a-z][a-z0-9_]{0,40}', name) or name in ('outside_bridge', 'other_interpreter', 'native_callees'):
+            raise ValueError('invalid host cost group name')
+        for key in keys:
+            if not KEY.fullmatch(key) or key in seen:
+                raise ValueError('host cost keys must be exact and disjoint')
+            seen.add(key)
     return {'locked_inputs': list(config['inputs']), 'control_frames': n}
 
 
@@ -179,23 +190,39 @@ def generate(config, out):
              '--analysis-backend', 'python', '--cfg-roots'], out / 'generate.log', env)
 
 
-def overlay(config, out, tracing):
+def overlay(config, out, tracing, profiling=False):
     dest = out / 'overlay'
     shutil.copytree(out / 'generated', dest / 'generated')
     roots, sites = set(), 0
     for path in (dest / 'generated').glob('*.c'):
-        text, found, count = generated(path.read_text(), config['roots'], tracing)
+        text, found, count = generated(path.read_text(), [] if profiling else config['roots'], tracing)
         path.write_text(text)
         roots.update(found)
         sites += count
     missing = [key for key in config['roots'] if int(key[:6], 16) not in roots]
-    if missing:
+    if missing and not profiling:
         raise ValueError(f'roots have no native instruction timing hook: {missing}')
     if tracing and not sites:
         raise ValueError('no native trace anchors found')
     source = ROOT / 'snesrecomp/runner/src/snes'
-    (dest / 'interp816.c').write_text(interpreter((source / 'interp816.c').read_text()))
-    (dest / 'interp_bridge.c').write_text(bridge((source / 'interp_bridge.c').read_text(), tracing))
+    interp = (source / 'interp816.c').read_text()
+    bridge_text = (source / 'interp_bridge.c').read_text()
+    (dest / 'interp816.c').write_text(interp if profiling else interpreter(interp))
+    if not profiling:
+        bridge_text = bridge(bridge_text, tracing)
+    if config.get('host_cost'):
+        bridge_text = host_cost(bridge_text)
+        names = ['outside_bridge', 'other_interpreter', 'native_callees'] + list(config['host_cost'])
+        lines = [f'#define HP_GROUPS {len(names)}',
+                 'static const char *hp_names[] = {' + ','.join(json.dumps(n) for n in names) + '};',
+                 'static unsigned hp_group(unsigned key) { switch(key) {']
+        for i, keys in enumerate(config['host_cost'].values(), 3):
+            for key in keys:
+                pc, m, x = key.split(':')
+                lines.append(f'case {(int(pc,16)<<2)|(int(m)<<1)|int(x)}u: return {i};')
+        lines.append('default: return 1; }}')
+        (dest / 'host_cost_groups.h').write_text('\n'.join(lines)+'\n')
+    (dest / 'interp_bridge.c').write_text(bridge_text)
     (dest / 'headless_main.c').write_text(host((ROOT / 'src/headless_main.c').read_text()))
     for path in HERE.glob('*.h'):
         shutil.copy2(path, dest / path.name)
@@ -243,6 +270,8 @@ def replay(config, out, frames, tracing=False):
                ST_FRAME_DIGESTS=str(out / 'frames.csv'), ST_FRAME_REFERENCE=config['inputs']['frames']['path'],
                SNESRECOMP_TIER2_CAPTURE='1', SNESRECOMP_TIER2_MANIFEST=str(out / 'tier2.json'),
                SNESRECOMP_TIER2_JOURNAL=str(out / 'tier2.jsonl'))
+    if config.get('host_cost'):
+        env['ST_HOST_COST'] = str(out / 'host-cost.json')
     if tracing:
         t = config['trace']
         env.update(ST_INSTRUCTION_TRACE=str(out / 'trace.csv'), ST_TRACE_FROM=str(t['from']),
@@ -305,21 +334,43 @@ def run(args):
         tracing = args.action == 'trace'
         if tracing and not config.get('trace'):
             raise ValueError('trace window missing in config')
-        source = overlay(config, out, tracing)
-        lane = config.get('cache', 'default') + ('-trace' if tracing else '-measure')
+        profiling = args.action == 'profile'
+        if profiling and args.short_only:
+            raise ValueError('profile uses full_frames; use run --short-only for validation')
+        if profiling and not config.get('host_cost'):
+            raise ValueError('host_cost groups missing in config')
+        source = overlay(config, out, tracing, profiling)
+        lane = config.get('cache', 'default') + ('-profile' if profiling else '-trace' if tracing else '-measure')
         build(config, out, source, lane)
-        result = replay(config, out / 'short', config['short_frames'], tracing)
-        if not args.short_only and not tracing and config['full_frames'] > config['short_frames']:
-            result = replay(config, out / 'full', config['full_frames'])
+        if profiling:
+            env = clean_env()
+            env['ST_HOST_COST'] = str(out / 'host-cost.json')
+            command([out / 'experiment', config['inputs']['rom']['path'], '--replay',
+                     config['inputs']['replay']['path'], '--frames', str(config['full_frames']),
+                     '--frame-ppm', out / 'final.ppm'], out / 'run.log', env)
+            cost = json.loads((out / 'host-cost.json').read_text())
+            if (cost['wall_seconds'] <= 0 or
+                    abs(sum(g['elapsed_ns'] for g in cost['groups']) / 1e9 - cost['wall_seconds']) > 0.000001):
+                raise ValueError('host cost scopes do not account for elapsed time')
+            missing_groups = [g['name'] for g in cost['groups']
+                              if g['name'] in config['host_cost'] and not g['visits']]
+            if missing_groups:
+                raise ValueError(f'host cost groups did not execute: {missing_groups}')
+            result = {'passed': True, 'host_cost': cost,
+                      'final_pixels_sha256': sha(out / 'final.ppm')}
+        else:
+            result = replay(config, out / 'short', config['short_frames'], tracing)
+            if not args.short_only and not tracing and config['full_frames'] > config['short_frames']:
+                result = replay(config, out / 'full', config['full_frames'])
         preflight(config)  # Input changes during a run invalidate the result too.
         after = snapshot()
         save(out / 'source-after.json', after)
         if after != json.loads((out / 'source-before.json').read_text()):
             raise RuntimeError('source changed during experiment; results cannot be accepted')
-        result['scope'] = 'bounded trace' if tracing else ('short probe' if args.short_only else 'representative replay')
+        result['scope'] = 'host elapsed attribution; no frame validation' if profiling else 'bounded trace' if tracing else ('short probe' if args.short_only else 'representative replay')
         save(out / 'result.json', result)
         print(json.dumps({'passed': True, 'scope': result['scope'], 'evidence': str(out),
-                          'instructions': result['profile']['instructions'], 'entries': result['entries']}))
+                          'instructions': result.get('profile', {}).get('instructions'), 'entries': result.get('entries')}))
     except Exception as exc:
         if not (out / 'result.json').exists():
             save(out / 'result.json', {'passed': False, 'error': str(exc)})
@@ -339,7 +390,7 @@ def main():
     init.add_argument('--short-frames', type=int, required=True)
     init.add_argument('--full-frames', type=int, required=True)
     init.add_argument('--out', type=Path, required=True)
-    for action in ('run', 'trace', 'preflight'):
+    for action in ('run', 'trace', 'preflight', 'profile'):
         p = sub.add_parser(action)
         p.add_argument('config', type=Path)
         if action != 'preflight':

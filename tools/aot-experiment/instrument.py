@@ -72,3 +72,26 @@ def generated(text, roots, trace):
         prototypes = '\nextern void st_record_entry(unsigned, unsigned, unsigned);\nextern void st_trace_before(CpuState *, unsigned);\n'
         text = once(text, '#include "funcs.h"', '#include "funcs.h"' + prototypes)
     return text, found, trace_sites
+
+
+def host_cost(text):
+    """Attribute bridge work to exact keys, excluding native callees.
+
+    Cleanup restores nested interpreter ownership on every return or continue.
+    Outside-bridge time includes rendering. Device completion stays with the
+    owning instruction, so group cost is an upper bound on removable overhead.
+    """
+    text = once(text, 'int g_aot_instruction_read_active;', '#include "host_cost.h"\nint g_aot_instruction_read_active;')
+    text = once(text, '    const int auto_quiescent = yield_pc == 0xFFFFFFFEu;', '''    hp_init();
+    HpScope hp_owner __attribute__((cleanup(hp_restore))) = {hp_current};
+    hp_set(1);
+    const int auto_quiescent = yield_pc == 0xFFFFFFFEu;''')
+    text = once(text, '        const uint32_t pc_before = ((uint32_t)in.k << 16) | in.pc;', '''        const uint32_t pc_before = ((uint32_t)in.k << 16) | in.pc;
+        hp_set(hp_group((pc_before << 2) | (!!in.mf << 1) | !!in.xf));
+        hp_visits[hp_current]++;''')
+    for expression in ('RecompReturn result = continuation->body(cpu);',
+                       'RecompReturn _air = cpu_dispatch_pc_paired(cpu, target, _fs);'):
+        text = once(text, expression, 'unsigned hp_before_native = hp_current;\n'
+                    '            hp_set(2);\n            ' + expression + '\n'
+                    '            hp_set(hp_before_native);')
+    return text

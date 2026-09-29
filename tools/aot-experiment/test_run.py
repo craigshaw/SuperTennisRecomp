@@ -84,6 +84,35 @@ class ExperimentTests(unittest.TestCase):
         self.assertLess(text.index('if (deadline)'), text.index('st_record_entry(0x'))
         self.assertLess(text.index('st_trace_before(cpu'), text.index('_aot_timing ='))
 
+    def test_host_scope_excludes_native_and_restores_nested_owners(self):
+        # A deterministic clock tests ownership without relying on host timing.
+        (self.root / 'host_cost_groups.h').write_text(
+            '#define HP_GROUPS 5\nstatic const char *hp_names[]={"outside","other","native","main","nmi"};\n')
+        header = (run.HERE / 'host_cost.h').read_text()
+        (self.root / 'host_cost.h').write_text(header)
+        source = self.root / 'scope.c'
+        source.write_text('''#include <stdint.h>
+#include <assert.h>
+static uint64_t ticks;
+static uint64_t test_clock(void) { return ticks; }
+#define HP_CLOCK test_clock
+#include "host_cost.h"
+static void nested(void) {
+  HpScope owner __attribute__((cleanup(hp_restore))) = {hp_current};
+  hp_set(4); ticks += 7;
+}
+int main(void) {
+  ticks=10; hp_set(3); ticks+=20; hp_set(2); ticks+=30;
+  nested(); assert(hp_current==2); ticks+=5;
+  hp_set(3); ticks+=11; hp_set(0);
+  assert(hp_elapsed[0]==10 && hp_elapsed[3]==31);
+  assert(hp_elapsed[2]==35 && hp_elapsed[4]==7);
+  return 0;
+}
+''')
+        run.command(['cc', '-std=c11', source, '-o', self.root / 'scope'], self.root / 'compile.log')
+        run.command([self.root / 'scope'], self.root / 'scope.log')
+
     def test_private_output_guard(self):
         with self.assertRaises(ValueError):
             run.private(run.ROOT / 'generated')

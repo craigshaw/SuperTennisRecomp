@@ -11,12 +11,15 @@
     "interpreted_instructions": 7475516,
     "interpreted_cpu_cycles": 37742735,
     "runtime_evidence_pointer": "captures/aot-apu-upload-current.txt",
-    "tooling_evidence_pointer": "captures/aot-tooling-current.txt"
+    "tooling_evidence_pointer": "captures/aot-tooling-current.txt",
+    "host_cost_evidence_pointer": "captures/aot-host-cost-current.txt"
   },
   "next": {
-    "action": "Use saved work sets to assess main-dispatch host cost and scheduling constraints before another compiler change.",
-    "reason": "The largest remaining interpreted work is not yet a proven host CPU bottleneck.",
-    "host_cpu_sample_available": false
+    "action": "Prototype a bounded main-loop continuation at 008035:M1X0 within existing owner 00801E:M1X0, retaining 00804D in the interpreter. Address the verified JML-back-edge rejection before building a candidate.",
+    "reason": "Main-loop own elapsed cost is about ten times the NMI clear loop, excluding native callees.",
+    "host_cpu_sample_available": false,
+    "host_elapsed_attribution_available": true,
+    "rejected_measurement": "Signal samples miss short scopes and disagree with elapsed attribution."
   },
   "ranked_questions": [
     {
@@ -24,27 +27,38 @@
       "target": "008031 main dispatch work set",
       "interpreted_instructions": 2441221,
       "distinct_instructions": 7,
-      "needed": "Host cost evidence and scheduler boundary analysis",
-      "stop": "No new mechanism until benefit and event ownership are understood"
+      "needed": "Validate a narrow compiler rule for the existing long back-edge to 008031; keep exact widths, scheduler ownership and interpreter progress history.",
+      "stop": "Do not invent an 00804D exit contract or add a fake function root. Reuse the saved generation rejection.",
+      "measured_seconds_mean": 0.650997,
+      "measured_elapsed_share_percent": 20.7609
     },
     {
       "priority": 2,
       "target": "00899F NMI clear work set",
       "interpreted_instructions": 588032,
       "distinct_instructions": 4,
-      "needed": "Interrupt ownership and deadline analysis; compare host cost",
-      "stop": "Do not assume ordinary continuation ownership applies to NMI"
+      "needed": "Deferred behind main loop; handler proof remains blocked by 07AC3F exit analysis.",
+      "stop": "Do not assume ordinary continuation ownership applies to NMI",
+      "measured_seconds_mean": 0.064085,
+      "measured_elapsed_share_percent": 2.0438
     },
     {
       "priority": 3,
-      "target": ["00D271:1:0", "00D285:1:0", "00D2A0:1:0"],
+      "target": [
+        "00D271:1:0",
+        "00D285:1:0",
+        "00D2A0:1:0"
+      ],
       "interpreted_instructions_union": 139392,
       "needed": "One feasibility check of the compiled tail and reusable compiler rule",
       "stop": "Defer if it needs a separate scheduler mechanism without broader benefit"
     },
     {
       "priority": 4,
-      "target": ["00EF63", "00C3B6"],
+      "target": [
+        "00EF63",
+        "00C3B6"
+      ],
       "needed": "Exact entry and exit proof; retain saved classification"
     }
   ],
@@ -56,10 +70,11 @@
     "Shared compiler suites for title tooling or cfg-only changes"
   ],
   "limits": [
-    "Observed instruction work is not host CPU time",
+    "Elapsed regions include device completion and measurement overhead; shares are not expected speedups.",
     "Tooling parity is against the accepted runtime, not a new Mesen hardware claim",
     "Tracing covers interpreter and instruction-timed AOT only",
-    "No Windows, manual gameplay or audio listening validation in the tooling pass"
+    "No Windows, manual gameplay or audio listening validation in the tooling pass",
+    "Three quiet pairs put profiler overhead at about 3%; no reliable per-PC signal sampling result."
   ],
   "workflow": "docs/AOT_EXPERIMENTS.md",
   "history": "docs/AOT_RECOVERY.md"

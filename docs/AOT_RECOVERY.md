@@ -5,7 +5,117 @@ scheduler continuation entries. The accepted runtime checkpoint is title `bd9a5f
 The shared pin is `1ae940c`, recorded in `SNESRECOMP_PATCHES.md`. This report
 supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: reusable experiment tooling, 29 September 2026
+## Latest checkpoint: main-loop host cost and next compiler gate, 29 September 2026
+
+The main dispatch loop is the next priority. Three quiet rendered comparisons
+attribute about **0.651 seconds, or 20.8% of instrumented replay time**, to
+its own interpreter work, excluding native callees. The NMI clear loop accounts
+for **0.064 seconds, or 2.04%**. These are elapsed host costs that include
+instruction completion, device work and profiler overhead. They are not
+predicted speedups. Runtime selection remains **345 bodies, 42 timing roots
+and eight continuations**; no cfg or shared source changed.
+
+### Measurement and one rejected method
+
+The experiment runner now accepts disjoint exact-key `host_cost` groups and
+has a `profile` mode. A private bridge overlay assigns each interpreter
+iteration to its exact key, separates native callees, and restores the prior
+owner after nested interpreter calls. It reads a monotonic clock only when
+the category changes. This covers short loops that a coarse sample can miss.
+The profile mode renders but disables frame hashing, work/entry counting and
+tier-2 capture. Normal title binaries contain none of this instrumentation.
+
+An initial macOS `sample` attachment failed for lack of process inspection
+access. A private SIGPROF experiment then undercounted short regions: it
+reported roughly 1.4% to 3% for the main loop and almost no NMI samples,
+while transition timing observed substantial work in both. Those signal
+counts are rejected for ranking. The retained implementation uses elapsed
+attribution only. Do not treat the rejected zero samples as zero CPU cost.
+
+| Region | Mean elapsed time | Range across three runs | Share of instrumented run |
+| --- | ---: | ---: | ---: |
+| Seven main-loop keys, M1X0 | 0.650997 s | 0.646016 to 0.655820 s | 20.67% to 20.87% |
+| Four NMI clear keys, M1X0 | 0.064085 s | 0.063532 to 0.064828 s | 2.02% to 2.06% |
+
+The accepted normal executable averages 3.045288 seconds; the attributed
+build averages 3.135667 seconds, about **2.97% instrumentation overhead**.
+Process CPU time is close to elapsed time in these quiet single-threaded runs.
+All final images match. These figures establish a useful ordering, not exact
+removable cost. A normal-build benchmark must establish any eventual gain.
+There is no desktop or sustained frame-rate claim.
+
+### Observed boundaries and static compiler findings
+
+The saved long profile still contains 2,441,221 interpreted instructions in
+`008031`, `008035`, `008039`, `00803D`, `008041`, `008045` and `008049`, all
+M1X0. The first six are long calls; the last is a long jump back to `008031`.
+The NMI work set has 588,032 instructions at `00899F`, `0089A2`, `0089A3`
+and `0089A6`. Its loop clears 32 bytes at `$0F00,X`.
+
+A bounded 100-frame replay produces 414 trace records in frames 73 through
+85, with no truncation. The observed main-loop keys use M1X0 and S=`0FFF`.
+The NMI loop uses M1X0 and S=`0FEB`, with store indices zero through 31.
+These are observed states in this input, not universal entry/exit contracts.
+The profiler sees 182 additional main-key visits before opcode execution;
+pre-instruction boundary checks can yield, so visits must not be reported as
+additional executed instructions.
+
+The title scheduler already delivers events at instruction boundaries and
+keeps active interrupt frames through RTI. No new interrupt system is needed
+for this assessment. The normal analyzer's proven `00801E:M1X0` prefix ends
+at the call to interpreted `00804D`. The emitted body nevertheless contains
+the later loop blocks. Do not infer the emitted region solely from the
+manifest's prefix instruction count.
+
+A single private generation probe selects instruction timing for existing
+`00801E:M1X0` and continuation `008035:M1X0`. Instruction and entry/depth
+validation complete, then generation rejects the long back-edge with:
+`continuations require known interpreted JMP tails`. No candidate is built
+or promoted. This is a specific compiler gate, not evidence that a new
+scheduler-region architecture is required. The five callees after `00804D`
+already have compiled M1X0 bodies and normal-analyzer M1X0 exit facts.
+
+The NMI owner `008917:M1X0` remains LLE-only because its call to `07AC3F`
+has an unproven exit. With approximately one tenth of the measured main-loop
+cost, it stays behind the main-loop work. Do not start a second exit-proof
+investigation for it now.
+
+### Validation, limits and next task
+
+One full 4,816-frame diagnostic replay reproduces both the accepted frame
+file and entire interpreter profile byte for byte. All eight continuation
+counts agree; bailouts, overflow, journal failures and changed opcodes remain
+zero. After replacing the rejected signal method, the final timing overlay
+passes the 100-frame probe. Three quiet timing pairs provide the final ranking.
+Eleven tool tests pass, including a deterministic C clock test that proves
+nested ownership restoration and exclusion of native callee time. Normal
+generated files, analyzer manifest and both executable hashes are unchanged.
+Shared suites, workflow checks and accepted gameplay are reused. Publication
+boundary and whitespace checks pass. Unrelated UI and lab files are preserved.
+
+No new Mesen observation, bulk screen, full replay sweep, shared compiler
+suite, normal rebuild, Windows run, manual gameplay or audio listening check
+was performed. The profiling extension is for the single-threaded POSIX host;
+its validation here is macOS only. Raw decode output that printed default
+M/X fields was corrected in a separate derived report using explicit decoder
+arguments and instruction lengths. The original report was retained.
+
+Private evidence is indexed by `captures/aot-host-cost-current.txt` under
+`captures/aot-host-cost-20260929`. Start with `ranking.json`,
+`validation-summary.json`, `boundary-summary.json` and the saved generation
+failure in `main-continuation-feasibility/generate.log`. Earlier signal runs
+are retained as rejected measurement evidence. Reuse the final quiet pairs.
+
+**Next task:** test the narrow compiler rule needed for the existing long
+back-edge, aiming to resume at `008035:M1X0` after the interpreted `00804D`
+call. Preserve exact widths, proven stack state, event deadlines and owning
+interpreter handoffs. Keep `00804D` interpreted and retain its progress history.
+Do not add a fake function root or invent its exit contract. Start from the
+saved rejection and existing tail tests; do not repeat classification or
+profiling. If that narrow rule cannot be proved, stop and report its specific
+missing invariant before designing a larger mechanism.
+
+## Previous checkpoint: reusable experiment tooling, 29 September 2026
 
 This pass improves the working loop. Runtime selection remains **345 bodies,
 42 instruction-timing roots and eight continuations**. No shared runtime,

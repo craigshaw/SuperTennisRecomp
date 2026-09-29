@@ -140,6 +140,51 @@ Matching traces therefore do not establish whole-program equivalence or new
 hardware facts. Use frame controls as well. Mesen, snesref or cosim remain
 available when a specific question needs independent evidence.
 
+## Host cost ranking
+
+Add `host_cost` to a private config. It maps group names to disjoint exact keys:
+
+```json
+{
+  "host_cost": {
+    "main_dispatch": ["008031:1:0", "008035:1:0", "008039:1:0",
+                      "00803D:1:0", "008041:1:0", "008045:1:0", "008049:1:0"],
+    "nmi_clear": ["00899F:1:0", "0089A2:1:0", "0089A3:1:0", "0089A6:1:0"]
+  }
+}
+```
+
+First validate the overlay with `run`. Then use:
+
+```sh
+python3 tools/aot-experiment/run.py profile captures/experiment/config.json \
+  --out captures/experiment/host-cost-01
+```
+
+`profile` uses the full replay and renders frames. It disables per-instruction
+work counts, entry counts, frame hashing and tier-2 capture. It records a final
+image hash, process user/system time and elapsed time by region. It does not
+compare frame controls or provide promotion approval. Compare with the accepted
+normal executable in quiet alternating runs; measure instrumentation overhead.
+Do not run another build or replay during those comparisons.
+
+The private overlay changes attribution only. Each interpreter iteration is
+assigned to its current exact key. Native callees have a separate category;
+nested interpreter calls restore their prior owner on return. A monotonic clock
+is read when the category changes. The timestamp totals must cover the measured
+interval and each requested group must execute. Visit counts include boundary
+checks that can yield before an opcode, so they can exceed executed instruction
+counts. Device completion remains charged to its owning instruction. These
+elapsed costs include necessary shared work and profiler overhead, and are
+upper bounds on potential savings rather than speedup predictions.
+
+This mode uses POSIX process accounting and the Clang/GCC cleanup extension.
+It is validated on the single-threaded macOS headless host only. Do not use it
+for a multithreaded desktop process. An initial signal-sampling experiment
+missed the short NMI loop and strongly disagreed with region timing; it was
+rejected and is not part of the tool. Do not use those private signal counts
+for ranking or treat zero samples as zero cost.
+
 ## Checkpoint maintenance
 
 Keep `AOT_CURRENT.json` small: baseline identity, private evidence pointers,
