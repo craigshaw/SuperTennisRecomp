@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "updated": "2026-09-29",
+  "accepted": {
+    "title_runtime_commit": "bd9a5f56b3f106a23c2a2c6c039f3575517b64b1",
+    "snesrecomp_commit": "1ae940c7ff1ba98762704c7acb8b02845ecf7abf",
+    "bodies": 345,
+    "instruction_timing_roots": 42,
+    "continuations": 8,
+    "replay_frames": 4816,
+    "interpreted_instructions": 7475516,
+    "interpreted_cpu_cycles": 37742735,
+    "runtime_evidence_pointer": "captures/aot-apu-upload-current.txt",
+    "tooling_evidence_pointer": "captures/aot-tooling-current.txt"
+  },
+  "next": {
+    "action": "Use saved work sets to assess main-dispatch host cost and scheduling constraints before another compiler change.",
+    "reason": "The largest remaining interpreted work is not yet a proven host CPU bottleneck.",
+    "host_cpu_sample_available": false
+  },
+  "ranked_questions": [
+    {
+      "priority": 1,
+      "target": "008031 main dispatch work set",
+      "interpreted_instructions": 2441221,
+      "distinct_instructions": 7,
+      "needed": "Host cost evidence and scheduler boundary analysis",
+      "stop": "No new mechanism until benefit and event ownership are understood"
+    },
+    {
+      "priority": 2,
+      "target": "00899F NMI clear work set",
+      "interpreted_instructions": 588032,
+      "distinct_instructions": 4,
+      "needed": "Interrupt ownership and deadline analysis; compare host cost",
+      "stop": "Do not assume ordinary continuation ownership applies to NMI"
+    },
+    {
+      "priority": 3,
+      "target": ["00D271:1:0", "00D285:1:0", "00D2A0:1:0"],
+      "interpreted_instructions_union": 139392,
+      "needed": "One feasibility check of the compiled tail and reusable compiler rule",
+      "stop": "Defer if it needs a separate scheduler mechanism without broader benefit"
+    },
+    {
+      "priority": 4,
+      "target": ["00EF63", "00C3B6"],
+      "needed": "Exact entry and exit proof; retain saved classification"
+    }
+  ],
+  "do_not_repeat": [
+    "Bulk tier-2 screen or unchanged full replay sweep",
+    "00804D rejected path",
+    "00CE51 AOT promotion",
+    "07D8A5 residual 2239 instructions or whole-native terminal PLP epilogue",
+    "Shared compiler suites for title tooling or cfg-only changes"
+  ],
+  "limits": [
+    "Observed instruction work is not host CPU time",
+    "Tooling parity is against the accepted runtime, not a new Mesen hardware claim",
+    "Tracing covers interpreter and instruction-timed AOT only",
+    "No Windows, manual gameplay or audio listening validation in the tooling pass"
+  ],
+  "workflow": "docs/AOT_EXPERIMENTS.md",
+  "history": "docs/AOT_RECOVERY.md"
+}

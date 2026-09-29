@@ -11,18 +11,9 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("rom", type=Path)
-    parser.add_argument("--event-crossing-audit", action="store_true")
-    parser.add_argument("--event-precision-profile", type=Path)
-    args = parser.parse_args()
-    expected = "6e45a80ea148654514cb4e8604a0ffcbc726946e70f9e0b9860e36c0f3fa4877"
-    if hashlib.sha256(args.rom.read_bytes()).hexdigest() != expected:
-        parser.error("unsupported ROM SHA-256")
-    subprocess.run([sys.executable, str(ROOT / "tools/apply-snesrecomp-patches.py"),
-                    "--check"], check=True)
-    env = os.environ.copy()
+def generation_environment(environ=None):
+    """Return the reviewed policy without generating files or checking the pin."""
+    env = dict(os.environ if environ is None else environ)
     # Normal builds have one reviewed policy. Use the emitter directly in
     # a private output directory for experiments with other generation flags.
     for key in list(env):
@@ -96,6 +87,21 @@ def main():
         "07D510:1:0",
         "019A8B:1:0", "019ACD:1:0", "02E98C:1:0", "02EC0B:1:0",
     ))
+    return env
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("rom", type=Path)
+    parser.add_argument("--event-crossing-audit", action="store_true")
+    parser.add_argument("--event-precision-profile", type=Path)
+    args = parser.parse_args()
+    expected = "6e45a80ea148654514cb4e8604a0ffcbc726946e70f9e0b9860e36c0f3fa4877"
+    if hashlib.sha256(args.rom.read_bytes()).hexdigest() != expected:
+        parser.error("unsupported ROM SHA-256")
+    subprocess.run([sys.executable, str(ROOT / "tools/apply-snesrecomp-patches.py"),
+                    "--check"], check=True)
+    env = generation_environment()
     if args.event_crossing_audit:
         env["SNESRECOMP_EMIT_EVENT_CROSSING_AUDIT"] = "1"
     if args.event_precision_profile:

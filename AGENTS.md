@@ -7,9 +7,13 @@ For tier-2 capture, AOT coverage experiments, or promotion into tracked cfg,
 also read [docs/AOT_COVERAGE.md](docs/AOT_COVERAGE.md). A private profile is a
 discovery input. Accepted coverage must be reproducible through the normal
 generation commands using tracked inputs and the contributor's verified ROM.
-For the current checkpoint, next batch and efficient screening procedure, read
-[docs/AOT_BATCH_SCREENING.md](docs/AOT_BATCH_SCREENING.md). Start with its
-overnight handoff before repeating an experiment.
+For the current checkpoint and next questions, read
+[docs/AOT_CURRENT.json](docs/AOT_CURRENT.json) and the latest section of
+[docs/AOT_RECOVERY.md](docs/AOT_RECOVERY.md). Use
+[docs/AOT_EXPERIMENTS.md](docs/AOT_EXPERIMENTS.md) for focused experiments.
+The overnight handoff in [docs/AOT_BATCH_SCREENING.md](docs/AOT_BATCH_SCREENING.md)
+is older. Consult its screening method or relevant historical evidence before
+repeating an experiment; do not restart the bulk screen.
 
 ## Repository boundaries
 

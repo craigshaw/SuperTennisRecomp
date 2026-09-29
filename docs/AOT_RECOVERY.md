@@ -1,11 +1,100 @@
 # AOT recovery
 
 The accepted normal build generates **345 AOT bodies**, with eight validated
-scheduler continuation entries. The previous checkpoint is title `331129a`.
+scheduler continuation entries. The accepted runtime checkpoint is title `bd9a5f5`.
 The shared pin is `1ae940c`, recorded in `SNESRECOMP_PATCHES.md`. This report
 supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: timed sound-data upload, 29 September 2026
+## Latest checkpoint: reusable experiment tooling, 29 September 2026
+
+This pass improves the working loop. Runtime selection remains **345 bodies,
+42 instruction-timing roots and eight continuations**. No shared runtime,
+compiler, cfg fact or patch changes were made. The accepted runtime commits
+above remain the behavioral baseline.
+
+### Reusable runner and evidence
+
+`tools/aot-experiment/run.py` now locks private inputs, imports the normal
+selection policy, generates a clean candidate, builds private source overlays,
+runs a short probe before one full replay, and produces compact results.
+It records source identity, build/replay commands and elapsed times. Both
+probes require the selected exact native keys to execute. Unchanged overlays
+use the CMake/Ninja cache; failed or stale inputs stop the attempt. Every
+attempt gets a separate evidence directory. No generated source or raw
+capture enters Git.
+
+The instruction tracer uses a copy of live interpreter registers and samples
+native instructions after their deadline guard. It records CPU registers,
+widths, clocks, APU timing and direct port state without MMIO reads. The CSV
+comparison identifies the first different fields and includes three preceding
+records. Missing rows fail; capped traces are labelled as prefix evidence.
+Root execution counters observe native instruction visits, not wrapper calls.
+Continuation counts retain the previously validated guest-cycle criterion.
+
+The normal policy was extracted into an importable function without changing
+its selections. `AOT_CURRENT.json` is the compact baseline and ranked queue.
+`AOT_EXPERIMENTS.md` defines the stage gates and stop conditions. `AGENTS.md`
+now directs agents to these current records before the older overnight handoff.
+The runner does not automate shared suite approval, cfg promotion or publication.
+
+### Checks performed
+
+The completed upload milestone was reused as the fixture. One new full
+**4,816-frame** run reproduces the accepted frame file and the entire
+interpreter profile byte for byte: **7,475,516 instructions and 37,742,735
+cycles**, 7,950 keys, zero overflow and changed opcodes. Bailouts and journal
+failures are zero. It records four native `07D8A5:M1X0` starts and 130
+`07D8CA:M1X0` continuation invocations; all seven earlier counts agree.
+
+A 90-frame control and candidate run compare **13,881 pre-instruction records**
+in upload frame 10. Registers, clocks and APU state match, and neither trace
+hits its 100,000-record limit. The control uses the saved pre-upload generated
+output with the current shared runtime. This checks interpreter/native tracer
+parity; it does not recreate the older runtime or add hardware evidence.
+
+A deliberately wrong private frame control stops at frame one and reports
+only the differing PC field. A separate five-record trace confirms the cap
+is reported as prefix evidence. Ten focused tool tests pass, covering stale
+locks, exclusive output, first differences, missing records, empty files,
+changed instrumentation anchors, native counter placement, command failures,
+private output paths and cache timestamp reuse. An unchanged 90-frame probe
+requires no compilation and retains the same measurement binary hash; its
+build invocation takes 0.016 seconds locally. This is a tooling measurement,
+not a title performance claim or a measured token saving.
+
+All seven workflow tests and 35 patch checks pass. Fresh normal generation
+emits five banks with zero reuse and reproduces all seven accepted C files
+and the analyzer manifest. Both existing normal binary hashes remain unchanged;
+production source is unchanged, so accepted gameplay and shared suites are
+reused. No new normal build, bulk screen, full input sweep, Mesen capture,
+Windows build, manual gameplay or audio listening check was needed. Publication
+boundary and whitespace checks pass. Unrelated UI and lab files are preserved.
+
+### Evidence, limits and next decision
+
+Private results are under `captures/aot-tooling-20260929`, indexed by
+`captures/aot-tooling-current.txt`. Start with `validation-summary.json`, then
+`validation1/full/result.json`, `trace-comparison.json` and
+`final-cache-proof/build-result.json`. The negative control is deliberately
+failing evidence, not a runtime regression. Older raw evidence stays unchanged.
+
+Tracing covers interpreter opcodes and instruction-timed AOT in a bounded
+window. Aggregate AOT, interrupt microsteps and scheduler-only waits are not
+instruction records. A passing probe does not establish unobserved entry
+variants. The harness currently rejects aggregate-only roots as execution
+counter targets. Its initial host validation is macOS only.
+
+The next decision is where further scheduler work pays. Use the saved main
+loop work set at `008031` (2,441,221 interpreted instructions) to establish
+host cost and event ownership, then compare the NMI clear loop at `00899F`
+(588,032). No sampled host CPU evidence exists yet. Instruction counts alone
+must not justify a new scheduler mechanism. The overlapping
+`00D271`/`00D285`/`00D2A0` group remains a bounded feasibility option with a
+139,392-instruction union. Defer it if compiled-tail ownership requires a
+separate mechanism without broader benefit. Preserve the existing exclusions
+and terminal-PLP boundary; do not reopen completed upload failures.
+
+## Runtime milestone: timed sound-data upload, 29 September 2026
 
 ### Observed path and bounded change
 
