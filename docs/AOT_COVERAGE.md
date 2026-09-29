@@ -85,7 +85,20 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 345 variants and seven continuations
+## Accepted normal-build checkpoint: 345 variants and eight continuations
+
+The `07D8A5:M1X0` sound upload now uses instruction timing and the internal
+`07D8CA:M1X0` continuation at local stack depth one. Patch 0035 supplies
+pre-port APU flushes and the required tested instruction forms. The terminal
+`07D90F:M1X0` status-restore block stays interpreted to preserve the caller's
+cooperative-wait behaviour. The long input passes all 4,816 frame comparisons;
+the new entry executes 130 times and removes 1,841,899 interpreted instructions,
+a 19.77% overall reduction and 99.88% for this graph. Work outside the graph,
+tracked cfg and the normal analyzer manifest are unchanged. Normal generation
+reproduces the candidate, with 345 bodies and 42 timing selections. See
+[AOT_RECOVERY.md](AOT_RECOVERY.md) for rejected candidates and retained limits.
+
+## Previous checkpoint: 345 variants and seven continuations
 
 The `00CE3F:M1X0` change adds instruction timing and the `00CE52:M1X0`
 continuation at local stack depth two. Patch 0034 permits a known interpreted

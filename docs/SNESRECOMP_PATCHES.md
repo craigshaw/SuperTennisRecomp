@@ -5,9 +5,9 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`cf5215d157d38526f81ddcf546e3515f019e46d5`](https://github.com/craigshaw/snesrecomp/commit/cf5215d157d38526f81ddcf546e3515f019e46d5)
+[`1ae940c7ff1ba98762704c7acb8b02845ecf7abf`](https://github.com/craigshaw/snesrecomp/commit/1ae940c7ff1ba98762704c7acb8b02845ecf7abf)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0034. All are published and retained under
+It contains patches 0001 through 0035. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
@@ -69,6 +69,22 @@ and its `00CE52:M1X0` loop at depth two, keeping `00CE51:M1X0` interpreted.
 The synthetic suite passes 24 complete and 576 event comparisons, with 562
 native entries. The build has 345 bodies and seven continuations.
 
+Patch 0035 adds pre-port APU flushes and saves/restores the pacing scope for
+instruction-timed bus access. Contiguous data words retain atomic MMIO access;
+long-indirect data words carry across banks while their direct-page pointers
+wrap within bank zero. The compiler admits PHP, terminal PLP, idempotent X-bit
+updates, M0/X0 LDA [dp],Y and M1 accumulator ROL. Actual index-width changes
+and nonterminal PLP remain rejected. Validated instruction-timed polls can run
+natively; aggregate-timed polls retain their scheduler guard. Terminal PLP
+blocks still unwind to the interpreter so their progress history and status
+restore remain available to a following cooperative wait.
+
+The title selects `07D8A5:M1X0` and internal `07D8CA:M1X0` at depth one.
+The final `07D90F:M1X0` block remains interpreted. The long input passes all
+4,816 saved frame comparisons and removes 1,841,899 interpreted instructions.
+The new synthetic checks cover 60 complete and 1,036 event comparisons.
+The build retains 345 bodies, with 42 timing selections and eight continuations.
+
 ## Ordered series
 
 | Patch | Purpose |
@@ -107,6 +123,7 @@ native entries. The build has 345 bodies and seven continuations.
 | `0032-Resume-timed-table-scans-with-proven-guest-stack-saves.patch` | Resume at proven local stack depths; add tested table-read, word-save, word DEC, transfer and local JMP instruction timing. |
 | `0033-Time-direct-page-ORA-in-selected-native-bodies.patch` | Enable tested byte and word direct-page ORA timing, including event recovery through saved-stack continuations. |
 | `0034-Allow-continuation-handoffs-to-known-interpreted-tails.patch` | Validate known interpreted JML handoffs with preserved local saves and existing scheduler ownership. |
+| `0035-Time-AOT-port-polls-with-bounded-status-epilogues.patch` | Match timed APU bus pacing, allow validated polls, and retain terminal status blocks in the interpreter. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee
@@ -167,10 +184,10 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
-and selects 41 exact entries for instruction timing. It also selects seven
+and selects 42 exact entries for instruction timing. It also selects eight
 validated internal scheduler continuations, separate from function roots.
 The normal output has 345 AOT bodies. The bus-cost selection contains 170
-exact keys, of which 136 emit bodies, including the instruction-timed selections.
+exact keys, of which 136 emit bodies. Instruction timing is selected separately.
 The other 34 remain interpreted under the validated cfg exclusions and exit
 proofs. Preserve this selection with the cfg; see [the recovery report](AOT_RECOVERY.md).
 No profile manifest is required. Global bus timing remains disabled, and
@@ -192,7 +209,7 @@ CMP, ADC and accumulator ASL. Patch 0024 adds ordinary direct JSR/JSL and
 immediate ORA. Unknown callee exits still block compiled continuations. External
 branch targets, indirect or special calls, unselected indirect addressing, other word stacks,
 unbalanced local stacks, other stack operations, unselected memory RMW, RTI and block moves remain outside this mode.
-Unsupported selections fail generation. The normal selection uses 41 validated
+Unsupported selections fail generation. The normal selection uses 42 validated
 exact entries, including the arithmetic-loop and word-operation entries below. Direct JML, CPX and INX are
 also supported by patches 0026 and 0027. Patch 0028 supports PHA/PLA with M=1
 and DEX. Stack depth must agree at joins and be zero at calls, compiled tails and

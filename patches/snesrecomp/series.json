@@ -1,7 +1,7 @@
 {
   "base_revision": "a64932f1af958f7e71a728ac1235d6cf911f71a0",
-  "integrated_revision": "cf5215d157d38526f81ddcf546e3515f019e46d5",
-  "integrated_patch_count": 34,
+  "integrated_revision": "1ae940c7ff1ba98762704c7acb8b02845ecf7abf",
+  "integrated_patch_count": 35,
   "patches": [
     {
       "file": "0001-Recognize-direct-long-call-trampolines.patch",
@@ -138,6 +138,10 @@
     {
       "file": "0034-Allow-continuation-handoffs-to-known-interpreted-tails.patch",
       "sha256": "74ec13b623839e901b7b0d842b6b8bb51928581fac596bc101ee72cc4d6a8c55"
+    },
+    {
+      "file": "0035-Time-AOT-port-polls-with-bounded-status-epilogues.patch",
+      "sha256": "dcd03e78e76a1714b38d67b9c63bee8e44c3b664e8904af9544d7ee4c3048b67"
     }
   ],
   "patched_files": {
@@ -147,21 +151,21 @@
     "recompiler-rs/src/insn.rs": "14bc167f9bdb98d3d06810433129cdd4974a878476860052f5d57bad923b31da",
     "recompiler/snes65816.py": "bc1f68c1eee311e9871b70f86c024e6cf6733c6ac8dd8257fd9fd7a51948f79d",
     "recompiler/snes_cycles.py": "a44156357d7322b9928ca224e3e15da9950d27f7d934785de3f8a3ebed652d8b",
-    "recompiler/v2/bus_timing.py": "f691a53a92140c0d2d89bc1650e9bb7b168e5818f20f253efdacf261cef01b0d",
-    "recompiler/v2/codegen.py": "b79388fae52fdd78a44e815aa69634588dbfce26516066e717792dd97bebdae3",
+    "recompiler/v2/bus_timing.py": "360fed826d07961d5ef4775e4137b1a789a0576404cf6024114f8cd589f80966",
+    "recompiler/v2/codegen.py": "77a9308fc345fd60a81b913939ad096069af758cec4acbc15a881f1c157b2630",
     "recompiler/v2/decoder.py": "680b901e9e9cd9eb630bf7f61bde7d9768379a524c3e786108e895906bfbaf7e",
-    "recompiler/v2/emit_function.py": "634f6a1a9350b29d8ceaf98190083b922b30678dac29c963d2517205dbfe4ef2",
+    "recompiler/v2/emit_function.py": "8d4120ad62f5b8f79ead3b4019dbcbb870bb905040f6669a86cd74cf3e84197c",
     "recompiler/v2/event_precision.py": "2a71585c31b61db28dac2879c647ab033a3bca4fd2eda215c2f6900a29bc4545",
     "recompiler/v2/program_analysis.py": "87a84f05444566651ef90783d58e356dc909651d8e053073087820ab9b1cb819",
     "runner/runner.cmake": "21e27ef03dc317a72f0a80c5077e371597fc7c21a4df62262dda2d0d2a1d6f78",
     "runner/src/common_rtl.c": "578c8598d3567c16629e9ca86bd772b615220c742a975321b5d340a01bab4a26",
     "runner/src/cpu_state.h": "780af911929e3235d88da544545c6096b7f43b9c17176771575dca85086ce38a",
-    "runner/src/snes/aot_bus_timing.h": "d65de720ce971c6fec1263c54dc5cd96133b386cea45b1e06ba73dca0c84d506",
+    "runner/src/snes/aot_bus_timing.h": "6149897f0cab4d80b3672d0450a1a5513c770ba644c42ace9d9ddf125801a13d",
     "runner/src/snes/input_replay.c": "02d4b48b9d4713e1a924441886917c92599ee8888143d4ad17906947f128b605",
     "runner/src/snes/input_replay.h": "e360950c9e3b59dad386d5deadddc977f864decf084e7c1cff9d7eb0d3c8f06b",
     "runner/src/snes/interp816.c": "8860939e520bdcedd9e8498100c97db53b63f8213d6c9330b0a1adf05a389845",
-    "runner/src/snes/interp_bridge.c": "779502ee8c0671f7e3d98c2c7cfd575515fd66bc3da8ef7f2f2387c72a604260",
-    "runner/src/snes/interp_bridge.h": "7a282dcc5a05fb2990b990194db2ce188dcd732596790c3e4f8b43c7f4816849",
+    "runner/src/snes/interp_bridge.c": "dae8e55d870df09f63ffcd15b7d4cb1a89fcb9bda1123056d12402cfb3a98044",
+    "runner/src/snes/interp_bridge.h": "d3064d75d8b23a5cc0ced3e9cc955cc6b5f694247a74a6ce433df77b007a1709",
     "runner/src/snes/ppu.c": "97507ef767c2b9d8e7185ff57a645c03cfd1fa570382b3d7cd2da5530585b5c9",
     "runner/src/snes/ppu.h": "1c211a4c23ee69fdb05e26d1d0b6a211152f854d07952eff288fde95bc8f07ce",
     "runner/src/snes/snes.c": "bf683b1b0702b3770ec342fe7a2d8dacd1516203aabee2a085622c303587c9c3",
@@ -173,12 +177,12 @@
     "tests/interp816/interp816_test.c": "96f820637d99c31b85164b1c52c56cddf4f22e97c5d3954935538fa4ec754e75",
     "tests/joypad/input_replay_test.c": "83187bc27411c3b5a96d0adab24ed452c9b042ccf9f0011c66f4444447e63965",
     "tests/ppu/ppu_sprite_limit_test.c": "b1dde2dbdc99e0c58b04a717844fd1835bd1b0a57f7643a8f1d98558ccfa84b9",
-    "tests/run_c_tests.sh": "ab9727ef5c89ae3784539c95fa2fd519b1537cf83eaa999cbd94f25788501895",
+    "tests/run_c_tests.sh": "173146072589fda2afa4fd12e966bae84da7dd4e1a28433d515eed33cd9cf29e",
     "tests/runtime_dispatch/rdnmi_open_bus_test.c": "a7d20fe93f3cce95cb37ab8f0ec2d0f779b029f2ef8f362b0849e9514dd93668",
     "tests/test_snes_cycles.py": "e992e134849775f4a9e2ac3683f47193621306fd96beb751f4a0b0d28bce23df",
     "tests/timing/README.md": "ea7c4c8e728d305115533fcab203775da25569457517a950a7108c4225a9688a",
-    "tests/timing/fixture.c": "8ff4ea38e7602e5a53759608a22fd0718e052f529a3378989ac855adfd0e6cc6",
-    "tests/timing/run.py": "52630d1c04f01b5d10b1ee8e9a1e7190fa635e2a87f64d0fe44ff5102214f553",
+    "tests/timing/fixture.c": "f864437cd6ffa375fbf99459bee0c1c19a522869cd26731074e87f00f6b4b2d4",
+    "tests/timing/run.py": "f2d80fc250a1bb627d0e1939719426c680947d34715bfe66e0f13cc81547ca95",
     "tests/timing/test_branch_cycles.py": "32cf6258be03d9b5857669b229ad19de1f2ae2a84e705217e7c7e1b2ac908334",
     "tests/timing/test_branch_instruction_timing.py": "f8beaa2d324faa51ad278a3eff508cb1749d7a4c8942f90530b57375048bbadd",
     "tests/timing/test_bus_clocks.py": "953fd1294aafa9115ac51e07d76032cbcc16fb268117654dfe983c33b9a1e09e",
@@ -198,7 +202,7 @@
     "tools/v2_regen.py": "06d4b96365630cc7ad77c7698ff1acd2492c0748b06be7f8e7783cd7f401458a",
     "recompiler/v2/translation_units.py": "2d30d78364fadfa93fe5dbfd80385bb7c2d8e8aa0b433b5a94c3d228ea811df3",
     "tests/v2/test_translation_units.py": "837c1900cd9e00e756722521477b56936006d19ee10fc2dbaf2724c922a23b22",
-    "tests/timing/test_status_instruction_timing.py": "3bd4c36581e4ed0dc0c0337424486e4e861b8ae3f3cb2c00d9ce07aa27fe2798",
+    "tests/timing/test_status_instruction_timing.py": "d4ac91170b3103871d84707115d008b2765a76246f98a1a76a71856ab8e3e5d5",
     "recompiler/v2/cfg_loader.py": "ac256033d8c01962aa95e31673ef6d02a4360e0bf5452200a1b995e1ac039f5b",
     "recompiler/v2/exit_mx_autoroute.py": "6f1ced57b664b6228d9c8f70317d884d62cff7e96adf638b6be8288df0e80d3f",
     "recompiler-rs/src/cfg.rs": "c97d92335e2558b8e136c5f3fe478f3ac57de4eef4af188389be2aec454d9ecc",
@@ -214,9 +218,10 @@
     "tests/timing/test_word_instruction_timing.py": "e334c19a711ab2335bcf15a6236e67a3ee40fd223d9c0c0824973de126e92442",
     "recompiler/v2/continuations.py": "43a5645bce262e49b51eebb0d41155f85353a1cef1a7dd83186bf95c4e25dfdb",
     "tests/timing/test_continuations.py": "7c65ede70725bf5affac373a6512a58d8a7d815eabca3532e57ef350e631f1b4",
-    "tests/timing/test_saved_stack_continuations.py": "a31909894243fc667d4e4943d27b8b10bbe30d13079cd1043fbe7e22018a5078",
+    "tests/timing/test_saved_stack_continuations.py": "098bb1cf13875601dd56284b927bda94ceb348c96ec22c0684d1a2da37f60b5f",
     "tests/timing/test_ora_dp_continuations.py": "a2ca0a5585a909f5a962d2812bc3f43d3320c75215403e44dc29850e5cf7a716",
-    "tests/timing/test_interpreted_tail_continuations.py": "c0bdb317cecd3396fdcea16936843d2d78bc580743273cc1342ce8689faae404"
+    "tests/timing/test_interpreted_tail_continuations.py": "c0bdb317cecd3396fdcea16936843d2d78bc580743273cc1342ce8689faae404",
+    "tests/timing/test_poll_continuations.py": "a22278144af3c3aad8ef22b3a6a6901c8dda3ab30adf221178b21291a64a1077"
   },
   "previous_integrated_revision": "3678d0a6d7036217f26e32f6b9087d2933783690",
   "previous_integrated_patch_count": 12

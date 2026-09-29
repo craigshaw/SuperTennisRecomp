@@ -44,6 +44,7 @@ def main():
         "01EBAE:1:0", "01ECCB:1:0", "01EF24:1:0",
         "01E5DF:1:0", "01E72F:1:0", "01EE3E:1:0",
         "00CFE8:1:0", "00D0DE:1:0", "00CE3F:1:0",
+        "07D8A5:1:0",
     ))
     # Separate scheduler entries into proven existing loop blocks. These do
     # not add cfg functions or assert new exit widths.
@@ -53,6 +54,7 @@ def main():
         "00CFE8:1:0>00CFFB:1:0",
         "00D0DE:1:0>00D0F1:1:0",
         "00CE3F:1:0>00CE52:1:0",
+        "07D8A5:1:0>07D8CA:1:0",
     ))
     # Preserve the validated bulk and recovery selections.
     # Global bus timing stays disabled.

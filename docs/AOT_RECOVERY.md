@@ -1,11 +1,126 @@
 # AOT recovery
 
-The accepted normal build generates **345 AOT bodies**, with seven validated
-scheduler continuation entries. The previous checkpoint is title `5eb191a`.
-The shared pin is `cf5215d`, recorded in `SNESRECOMP_PATCHES.md`. This report
+The accepted normal build generates **345 AOT bodies**, with eight validated
+scheduler continuation entries. The previous checkpoint is title `331129a`.
+The shared pin is `1ae940c`, recorded in `SNESRECOMP_PATCHES.md`. This report
 supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: preserve interpreted tail ownership, 29 September 2026
+## Latest checkpoint: timed sound-data upload, 29 September 2026
+
+### Observed path and bounded change
+
+The saved profile assigns 1,844,138 interpreted instructions to
+`07D8A5:M1X0`, across four sound-data uploads in frames 10 through 1571.
+The existing compiled body immediately took its scheduler memory-poll guard.
+A bounded 90-frame control trace observes entry at frame 10 with S=`0FF9`,
+PHP leaving S=`0FF8`, and the `07D8CA:M1X0` byte-transfer loop at that depth.
+PLP restores S=`0FF9`; RTL returns to `028558` with S=`0FFC` at frame 49.
+The trace matches the saved control. Its first launch used an incorrect frame
+reference path and stopped before useful execution; `trace90` is the corrected
+capture. No raw evidence was overwritten.
+
+Patch 0035 enables the narrowly required forms in selected native instruction
+timing: PHP, terminal PLP, idempotent X-bit updates, M0/X0 LDA [dp],Y and M1
+accumulator ROL. Actual X-width changes and nonterminal PLP still fail validation.
+Long-indirect data words carry across the 24-bit address boundary; direct-page
+pointer words still wrap within bank zero. Contiguous words preserve atomic
+MMIO callbacks. Stack depth and join checks remain required. The title adds
+`07D8A5:1:0>07D8CA:1:0` at proven local depth one and selects the existing root
+for instruction timing. No cfg, function root or exit-width contract changes.
+
+### Two rejected boundaries and the retained limit
+
+The first candidate differed at frame 11. A bounded instruction comparison
+finds identical CPU state and clocks through the first transfer, then a
+different reply at `07D8CF`. The interpreter flushes pending relative APU time
+before port accesses; the timed AOT helpers did not. Patch 0035 shares that
+pre-port flush and preserves the APU pacing scope around timed reads/writes.
+It leaves the existing title clock policy in place. Ordinary cartridges still
+use the bridge's relative catch-up as well as frame scheduling; the shared
+absolute-only policy is restricted to SA-1. Do not assume Super Tennis uses
+that absolute-only branch.
+
+With port pacing corrected, a whole-native epilogue matched through the
+upload but differed in APU RAM at frame 55. The first later CPU trace difference
+was in the caller's cooperative wait at `02855D`/`028560`, after the upload
+returned in frame 49. The interpreter's repeated-state history detects that
+wait at a different point after a native epilogue. Changing the wait algorithm
+would broaden this milestone and invalidate saved timing controls.
+
+The accepted compiler boundary therefore keeps terminal PLP blocks in the
+scheduler interpreter. For this body it unwinds at `07D90F:M1X0`, before the
+four final port clears, status restore and return. All six epilogue instructions
+still execute four times in the interpreter. Aggregate-timed memory polls also
+retain their original entry guard. A future agent must preserve this boundary
+until interpreter progress-history parity is handled and validated separately.
+The failed candidates and traces are retained; do not repeat their experiments.
+
+### Execution and validation
+
+The accepted clean candidate matches all **4,816 frames** of the saved long
+input, including frame-boundary CPU state/clock, WRAM, VRAM, palette, OAM,
+APU RAM and rendered-pixel digests. It has zero bailouts, tuple overflow,
+journal failures and changed opcodes. The new continuation commits native work
+on **130 invocations**. All seven earlier continuation counts are unchanged.
+
+| Exact work set | Before | After |
+| --- | ---: | ---: |
+| `07D8A5:M1X0` graph | 1,844,138 | 2,239 |
+| Whole long replay | 9,317,415 | 7,475,516 |
+
+This removes **1,841,899 interpreted instructions, or 19.77% overall**, and
+6,117,439 interpreted CPU cycles. It recovers **99.88%** of this graph's
+interpreted work. Every instruction count outside this graph is unchanged.
+The selection remains **345 bodies**, with **42 instruction-timing entries
+and eight continuations**. These uploads occur during transitions; this is
+not a claim of a 19.77% steady gameplay frame-rate gain.
+
+The new synthetic suite passes **60 complete and 1,036 event comparisons**,
+with 1,011 native continuation entries. It covers real timed device waits,
+byte/word ports, saved status, SlowROM/FastROM, RTS/RTL, carry/N/Z, data-bank
+crossings, direct-page pointer wrap, IRQ, NMI, refresh and interpreted starts.
+Python v2 passes **403/403**. The full shared C check set passes, reusing its
+passing prefix and resuming after two old rejection tests were updated for
+newly supported forms. They now reject actual X changes and word SBC [dp],Y.
+The optional DSP-1 firmware test is skipped because the external ROM is unset.
+
+Fresh normal cfg-only generation emits five banks with zero cache reuse and
+reproduces all seven candidate C files plus the entire analyzer manifest.
+The manifest is also byte identical to the previous checkpoint and passes the
+lab reader. Only `bank07_v2.c` and the continuation table change in generated
+text. Desktop/headless builds pass. The normal library passes the same
+4,816-frame comparison with zero capture diagnostics; the normal neutral
+180-frame check passes. All seven workflow tests, 35 patch checks,
+publication-boundary and whitespace checks pass.
+
+Three alternating rendered normal-build pairs, after one warm-up each,
+average 3.19631 seconds for the control and
+3.07209 seconds for the candidate. All three pairs
+improve and their final images match. This suggests **3.89% less local wall time**.
+It is a short local measurement, not a sustained gameplay frame-rate result.
+
+### Evidence and next step
+
+Private evidence is under `captures/aot-apu-upload-20260929`, indexed by
+`captures/aot-apu-upload-current.txt` and the recovery follow-up chain. Use
+`candidate3-long` and `normal-long` as the accepted evidence. `candidate/wide`
+and `candidate-long` are rejected experiments. The retained profile,
+classification, control and unchanged checks were reused. No bulk screen,
+full input sweep, new Mesen capture, native-analyzer rebuild, Windows build,
+manual gameplay or audio listening check was performed. This is equivalence
+to the accepted runtime model, with no new Mesen hardware claim. Unrelated
+UI and lab files are preserved.
+
+The next small package remains the overlapping `00D271`/`00D285`/`00D2A0`
+group, **139,392 instructions in its union**. Its tail reaches an existing
+compiled target, so the known-interpreted-tail rule does not apply. The larger
+remaining areas are the seven-instruction `008031` main dispatch loop
+(2,441,221 instructions) and the four-instruction `00899F` NMI clear loop
+(588,032 instructions). Both need separate scheduling analysis before a
+compiler change. Keep `00CE51` excluded. Do not reopen `00804D`, chase the
+2,239-instruction upload residual, or remove the terminal-status guard.
+
+## Previous checkpoint: preserve interpreted tail ownership, 29 September 2026
 
 ### Observed path and bounded change
 
