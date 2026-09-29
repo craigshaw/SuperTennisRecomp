@@ -1,11 +1,106 @@
 # AOT recovery
 
-The accepted normal build generates **345 AOT bodies**, with eight validated
-scheduler continuation entries. The accepted runtime checkpoint is title `bd9a5f5`.
-The shared pin is `1ae940c`, recorded in `SNESRECOMP_PATCHES.md`. This report
+The accepted normal build generates **345 AOT bodies**, with nine validated
+scheduler continuation entries. The accepted runtime checkpoint is title `95b90e2`.
+The shared pin is `9f94625`, recorded in `SNESRECOMP_PATCHES.md`. This report
 supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: main-loop host cost and next compiler gate, 29 September 2026
+## Latest checkpoint: main-loop continuation accepted, 29 September 2026
+
+The normal build now resumes at `008035:M1X0` within existing owner
+`00801E:M1X0`. The main loop uses AOT for five calls and its long back-edge,
+then hands back to the interpreter at `008031`. The callee `00804D` stays
+interpreted and keeps its progress history. The selection has **345 bodies,
+43 instruction-timing roots and nine continuations**. No cfg function, exit
+contract or runtime scheduler mechanism was added.
+
+### Proof and the focused correction
+
+The saved generation rejection identified an unnamed same-bank JML as the
+blocking gate. Patch 0036 permits this narrow case only when the target is
+a decoded exact M/X instruction before the jump, separate from the root,
+with zero local stack depth at both ends and no compiled exact entry.
+It collects instruction depths during the existing stack proof. The ordinary
+stack validator runs first, so this rule cannot borrow the saved-stack
+exception for named interpreted tails. Missing or mismatched exact targets,
+nonzero depths, forward jumps, root jumps and compiled destinations fail.
+
+The first synthetic test exposed a second gate: the emitter abandoned unnamed
+same-bank transfers, returning after one loop iteration. The correction sends
+only the proven back-edge through the existing interpreter-owner tail handoff.
+The final suite passes 32 complete and 768 event comparisons, with 860 native
+entries. Eight added cases cover both M widths, SlowROM/FastROM, RTS/RTL roots,
+interpreted callees and resumed execution. Event checks include deadlines,
+refresh, NMI and IRQ. The initial failure remains in private evidence.
+
+### Replay result and useful work
+
+The 100-frame probe matches and executes the new continuation 27 times.
+One representative 4,816-frame replay then matches every saved frame field,
+executes it 348,746 times and reports no bailouts, tuple overflow, journal
+failures or changed opcodes. All eight earlier continuation counts agree
+with the accepted control. The normal Python analyzer manifest is byte
+identical to the earlier checkpoint.
+
+| Exact M1X0 instruction | Interpreted before | Interpreted after |
+| --- | ---: | ---: |
+| `008035` | 348,746 | 0 |
+| `008039` | 348,746 | 390 |
+| `00803D` | 348,746 | 968 |
+| `008041` | 348,746 | 2,576 |
+| `008045` | 348,746 | 3,538 |
+| `008049` | 348,745 | 3,927 |
+
+Only these six instruction counts change. `008031`, `00804D` and all work
+outside this set remain unchanged. Total interpreted work falls from
+7,475,516 to **5,394,440 instructions**, a reduction of **2,081,076 or 27.84%**.
+Interpreted CPU cycles fall from 37,742,735 to 22,473,399. These counters
+measure tier movement, not guest instructions or time removed from the game.
+The 11,399 residual later-key instructions are retained after event handoffs;
+do not start another continuation expansion for this small remainder.
+
+Three quiet warm pairs of normal rendered headless runs average **3.057512
+seconds before and 2.632804 seconds after**, or **13.89% less elapsed time**.
+Process CPU time falls by 13.90%. All final image hashes agree. The first
+pair is preserved but treated as warm-up because the first copied baseline
+launch had 0.269 seconds of wall time without CPU time. One extra pair gives
+three warm comparisons. This is a local result, not a desktop frame-rate claim.
+
+### Promotion, reuse and remaining limits
+
+The final shared source passes Python v2 403/403 and the shared C suite once.
+Seven workflow checks pass, including recovery from the old base and CRLF
+checkout. Patch 0036 and the updated source hashes reproduce the new shared
+pin. Fresh normal generation in an empty output directory matches all seven
+candidate C files and the complete manifest. The normal desktop and headless
+build succeeds, and the headless neutral 180-frame check passes. Publication
+boundary and whitespace checks pass. Unrelated UI and lab changes are preserved.
+
+The cached experiment takes 3.45 seconds to generate, 2.93 seconds to build
+and 5.38 seconds for the instrumented full replay. It reuses the accepted
+`aot-apu-upload-20260929/normal-long/frames.csv` and
+`candidate3-long/opcode-work.csv`, plus the saved host-cost ranking and
+generation rejection. No bulk screen, classification rerun or new harness
+was needed. Wider title replays, Windows, manual gameplay and audio listening
+were not repeated. There is no new Mesen hardware-equivalence claim.
+
+Private evidence is indexed by `captures/aot-main-loop-current.txt`, under
+`captures/aot-main-loop-20260929`. Start with `validation-summary.json`,
+`candidate1/result.json`, `work-delta.json`, `normal-reproducibility.json`
+and `benchmark-warm.json`. Raw initial failures and warm-up measurements are
+retained. The summary records both normal executable hashes and exact commits.
+
+**Next task:** make one static feasibility check for the NMI clear loop at
+`00899F`, using the saved boundaries and existing interrupt owner. It retains
+588,032 interpreted instructions but only about 0.064 seconds of measured own
+host cost in the earlier build. Its `008917` owner still has the `07AC3F`
+exit-analysis gap. Identify the missing proof before requesting new captures
+or building. Do not assume ordinary continuation ownership applies to NMI or
+invent a callee exit. If it needs a separate scheduler mechanism, park it and
+check the `00D271`/`00D285`/`00D2A0` compiled-tail group once. Keep `00804D`
+and the completed main-loop residual out of the immediate queue.
+
+## Previous checkpoint: main-loop host cost and next compiler gate, 29 September 2026
 
 The main dispatch loop is the next priority. Three quiet rendered comparisons
 attribute about **0.651 seconds, or 20.8% of instrumented replay time**, to
