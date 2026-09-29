@@ -85,7 +85,20 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 345 variants and eight continuations
+## Accepted normal-build checkpoint: 345 variants and nine continuations
+
+The main loop resumes at `008035:M1X0` within existing owner `00801E:M1X0`.
+Patch 0036 permits a proven internal JML back-edge to hand off to its owning
+interpreter. The call at `008031` and callee `00804D` remain interpreted.
+No cfg entry or exit contract is added. The 4,816-frame input matches the
+accepted control; the new continuation executes 348,746 times and removes
+2,081,076 interpreted instructions, a 27.84% overall reduction. Work outside
+the six selected loop instructions and all earlier continuation counts stay
+unchanged. Normal generation retains 345 bodies, with 43 timing selections
+and nine continuations. See [AOT_RECOVERY.md](AOT_RECOVERY.md) for normal
+generation checks, measured performance and remaining limits.
+
+## Previous checkpoint: 345 variants and eight continuations
 
 The `07D8A5:M1X0` sound upload now uses instruction timing and the internal
 `07D8CA:M1X0` continuation at local stack depth one. Patch 0035 supplies

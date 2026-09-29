@@ -5,9 +5,9 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`1ae940c7ff1ba98762704c7acb8b02845ecf7abf`](https://github.com/craigshaw/snesrecomp/commit/1ae940c7ff1ba98762704c7acb8b02845ecf7abf)
+[`9f9462528f21faa42ec3a7296df3d07c34db9fb3`](https://github.com/craigshaw/snesrecomp/commit/9f9462528f21faa42ec3a7296df3d07c34db9fb3)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0035. All are published and retained under
+It contains patches 0001 through 0036. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
@@ -85,6 +85,20 @@ The final `07D90F:M1X0` block remains interpreted. The long input passes all
 The new synthetic checks cover 60 complete and 1,036 event comparisons.
 The build retains 345 bodies, with 42 timing selections and eight continuations.
 
+Patch 0036 permits unnamed internal JML back-edges in selected continuation
+bodies. The destination must be a decoded exact M/X instruction in the same
+bank, before the jump and separate from the root, with zero local stack depth
+at both ends and no compiled exact entry. Emission uses the existing owning
+interpreter handoff rather than abandoning the unresolved transfer. It adds
+no runtime mechanism, cfg function or exit-state declaration.
+
+The title selects existing `00801E:M1X0` for instruction timing and resumes
+at `008035:M1X0`. The `008031` call and `00804D` remain interpreted. The
+expanded tail suite passes 32 complete and 768 event comparisons, including
+860 native entries. The long title input removes 2,081,076 interpreted
+instructions with all 4,816 frames equal. The normal analyzer manifest stays
+unchanged: 345 bodies, 43 timing selections and nine continuations.
+
 ## Ordered series
 
 | Patch | Purpose |
@@ -124,6 +138,7 @@ The build retains 345 bodies, with 42 timing selections and eight continuations.
 | `0033-Time-direct-page-ORA-in-selected-native-bodies.patch` | Enable tested byte and word direct-page ORA timing, including event recovery through saved-stack continuations. |
 | `0034-Allow-continuation-handoffs-to-known-interpreted-tails.patch` | Validate known interpreted JML handoffs with preserved local saves and existing scheduler ownership. |
 | `0035-Time-AOT-port-polls-with-bounded-status-epilogues.patch` | Match timed APU bus pacing, allow validated polls, and retain terminal status blocks in the interpreter. |
+| `0036-Allow-proven-internal-JML-continuation-backedges.patch` | Hand off unnamed internal back-edges with exact widths and zero local stack depth to the existing interpreter owner. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee

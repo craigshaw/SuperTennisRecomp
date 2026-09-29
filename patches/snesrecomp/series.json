@@ -1,7 +1,7 @@
 {
   "base_revision": "a64932f1af958f7e71a728ac1235d6cf911f71a0",
-  "integrated_revision": "1ae940c7ff1ba98762704c7acb8b02845ecf7abf",
-  "integrated_patch_count": 35,
+  "integrated_revision": "9f9462528f21faa42ec3a7296df3d07c34db9fb3",
+  "integrated_patch_count": 36,
   "patches": [
     {
       "file": "0001-Recognize-direct-long-call-trampolines.patch",
@@ -142,6 +142,10 @@
     {
       "file": "0035-Time-AOT-port-polls-with-bounded-status-epilogues.patch",
       "sha256": "dcd03e78e76a1714b38d67b9c63bee8e44c3b664e8904af9544d7ee4c3048b67"
+    },
+    {
+      "file": "0036-Allow-proven-internal-JML-continuation-backedges.patch",
+      "sha256": "770cd1e6fa4c230d19d1a8147118c0aa018fc375af7c4b291bfd12451f8c022d"
     }
   ],
   "patched_files": {
@@ -151,10 +155,10 @@
     "recompiler-rs/src/insn.rs": "14bc167f9bdb98d3d06810433129cdd4974a878476860052f5d57bad923b31da",
     "recompiler/snes65816.py": "bc1f68c1eee311e9871b70f86c024e6cf6733c6ac8dd8257fd9fd7a51948f79d",
     "recompiler/snes_cycles.py": "a44156357d7322b9928ca224e3e15da9950d27f7d934785de3f8a3ebed652d8b",
-    "recompiler/v2/bus_timing.py": "360fed826d07961d5ef4775e4137b1a789a0576404cf6024114f8cd589f80966",
+    "recompiler/v2/bus_timing.py": "cac867bf8a1e0ec10935f231b7c1dfc6483c2bf4f401e2fa9766a14fcc260f66",
     "recompiler/v2/codegen.py": "77a9308fc345fd60a81b913939ad096069af758cec4acbc15a881f1c157b2630",
     "recompiler/v2/decoder.py": "680b901e9e9cd9eb630bf7f61bde7d9768379a524c3e786108e895906bfbaf7e",
-    "recompiler/v2/emit_function.py": "8d4120ad62f5b8f79ead3b4019dbcbb870bb905040f6669a86cd74cf3e84197c",
+    "recompiler/v2/emit_function.py": "90bae7543708f33083a217be5b027742d1c343a816a1ad6051ad13f6f0e1cfe7",
     "recompiler/v2/event_precision.py": "2a71585c31b61db28dac2879c647ab033a3bca4fd2eda215c2f6900a29bc4545",
     "recompiler/v2/program_analysis.py": "87a84f05444566651ef90783d58e356dc909651d8e053073087820ab9b1cb819",
     "runner/runner.cmake": "21e27ef03dc317a72f0a80c5077e371597fc7c21a4df62262dda2d0d2a1d6f78",
@@ -216,11 +220,11 @@
     "tests/timing/test_stack_instruction_timing.py": "2cde2a105957dc792e689859668a6b42ec1af7c3ffe852c97f91274a11e453ba",
     "tests/timing/test_subtract_rmw_instruction_timing.py": "c7618c1c1e3ac18e243a0d27af1e2dd856a5bea01927757841a00cff4877f4c8",
     "tests/timing/test_word_instruction_timing.py": "e334c19a711ab2335bcf15a6236e67a3ee40fd223d9c0c0824973de126e92442",
-    "recompiler/v2/continuations.py": "43a5645bce262e49b51eebb0d41155f85353a1cef1a7dd83186bf95c4e25dfdb",
+    "recompiler/v2/continuations.py": "5fbb537c96af5ba0c3af384ece462dd2af3a8b7ba87bd9812cbd2a0de01e04bb",
     "tests/timing/test_continuations.py": "7c65ede70725bf5affac373a6512a58d8a7d815eabca3532e57ef350e631f1b4",
     "tests/timing/test_saved_stack_continuations.py": "098bb1cf13875601dd56284b927bda94ceb348c96ec22c0684d1a2da37f60b5f",
     "tests/timing/test_ora_dp_continuations.py": "a2ca0a5585a909f5a962d2812bc3f43d3320c75215403e44dc29850e5cf7a716",
-    "tests/timing/test_interpreted_tail_continuations.py": "c0bdb317cecd3396fdcea16936843d2d78bc580743273cc1342ce8689faae404",
+    "tests/timing/test_interpreted_tail_continuations.py": "c06642bd142cc44cd1f2fd978f1772e58ee589a1922ea843043acbe987aa3c19",
     "tests/timing/test_poll_continuations.py": "a22278144af3c3aad8ef22b3a6a6901c8dda3ab30adf221178b21291a64a1077"
   },
   "previous_integrated_revision": "3678d0a6d7036217f26e32f6b9087d2933783690",

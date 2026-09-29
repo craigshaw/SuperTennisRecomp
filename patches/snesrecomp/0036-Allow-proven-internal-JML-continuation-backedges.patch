@@ -1,0 +1,184 @@
+From 9f9462528f21faa42ec3a7296df3d07c34db9fb3 Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Tue, 29 Sep 2026 21:32:49 +0100
+Subject: [PATCH] Allow proven internal JML continuation backedges
+
+Validate unnamed same-bank backward landings at decoded exact widths and zero local stack depth. Use the existing interpreter owner handoff without promoting an internal address to a function root.
+
+Validation: Python v2 403/403, shared C suite, 32 complete and 768 event tail comparisons, and the Super Tennis 4816-frame replay.
+
+Co-authored-by: Codex <codex@openai.com>
+---
+ recompiler/v2/bus_timing.py                   |  8 +++-
+ recompiler/v2/continuations.py                | 28 +++++++++++
+ recompiler/v2/emit_function.py                | 17 ++++++-
+ .../test_interpreted_tail_continuations.py    | 47 +++++++++++++++++++
+ 4 files changed, 98 insertions(+), 2 deletions(-)
+
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+index 34acd9e..e56ec39 100644
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -75,7 +75,8 @@ def scope_function(emitter):
+     return scoped
+ 
+ 
+-def validate_instruction_leaf(block_pairs, cfg, *, interpreted_tail_keys=()):
++def validate_instruction_leaf(block_pairs, cfg, *, interpreted_tail_keys=(),
++                              instruction_depths=None):
+     """Accept native bodies with tested control flow, arithmetic and status."""
+     from snes65816 import (IMP, ACC, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X,
+                           DP, DP_X, DP_Y, REL, REL16, INDIR_LY)
+@@ -168,6 +169,11 @@ def validate_instruction_leaf(block_pairs, cfg, *, interpreted_tail_keys=()):
+         key = pending.pop()
+         depth = depths[key]
+         for insn, ops in block_pairs[key]:
++            if instruction_depths is not None:
++                point = (insn.addr, insn.m_flag, insn.x_flag)
++                if point in instruction_depths and instruction_depths[point] != depth:
++                    raise ValueError("instruction timing requires equal depth at exact instructions")
++                instruction_depths[point] = depth
+             if insn.mnem == "PHA":
+                 depth += 1 if insn.m_flag else 2
+             elif insn.mnem == "PLA":
+diff --git a/recompiler/v2/continuations.py b/recompiler/v2/continuations.py
+index c3d2971..3622511 100644
+--- a/recompiler/v2/continuations.py
++++ b/recompiler/v2/continuations.py
+@@ -66,6 +66,34 @@ def interpreted_tails(block_pairs, cfg):
+     return result
+ 
+ 
++def internal_interpreted_backedges(block_pairs, cfg, instruction_depths):
++    """Prove unnamed internal JML landings without inventing function roots.
++
++    The ordinary stack check runs first, so these transfers cannot borrow the
++    saved-stack exception for named interpreted tails. Require zero local depth
++    at both exact instruction boundaries. Leave the destination interpreted so
++    its call/return and progress history stay with the active scheduler owner.
++    """
++    from v2.codegen import get_name_for_pc, has_exact_variant
++    result = set()
++    entry = (cfg.entry.pc, cfg.entry.m, cfg.entry.x)
++    for key, pairs in block_pairs.items():
++        if not pairs or cfg.blocks[key].successors:
++            continue
++        insn = pairs[-1][0]
++        if insn.mnem != 'JMP' or insn.mode != LONG:
++            continue
++        target = (insn.operand & 0xFFFFFF, insn.m_flag, insn.x_flag)
++        site = (insn.addr, insn.m_flag, insn.x_flag)
++        if (target != entry and target[0] >> 16 == insn.addr >> 16
++                and target[0] < insn.addr and get_name_for_pc(target[0]) is None
++                and not has_exact_variant(*target)
++                and instruction_depths.get(site) == 0
++                and instruction_depths.get(target) == 0):
++            result.add(site)
++    return result
++
++
+ def validate(points, block_pairs, depths, graph, entry_s_offset,
+              interpreted_tail_keys=()):
+     """Require a proven local stack depth and no predecessor host temporaries."""
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index 8c4a581..bd3cbbe 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -854,9 +854,13 @@ def emit_function(rom: bytes, bank: int, start: int,
+     if instruction_timing:
+         interpreted_tail_keys = (continuations.interpreted_tails(block_per_insn_ir, cfg)
+                                  if resume_points else ())
++        instruction_depths = {} if resume_points else None
+         depths = bus_timing.validate_instruction_leaf(
+-            block_per_insn_ir, cfg, interpreted_tail_keys=interpreted_tail_keys)
++            block_per_insn_ir, cfg, interpreted_tail_keys=interpreted_tail_keys,
++            instruction_depths=instruction_depths)
+         if resume_points:
++            interpreted_tail_keys |= continuations.internal_interpreted_backedges(
++                block_per_insn_ir, cfg, instruction_depths)
+             resume_depths = continuations.validate(
+                 resume_points, block_per_insn_ir, depths, graph, entry_s_offset,
+                 interpreted_tail_keys)
+@@ -1680,6 +1684,17 @@ def emit_function(rom: bytes, bank: int, start: int,
+                                     register_call_demand,
+                                 )
+                                 tgt_name = get_name_for_pc(target_pc24)
++                                if (resume_points and tgt_name is None
++                                        and (insn.addr, jml_m, jml_x)
++                                        in interpreted_tail_keys):
++                                    # Proven internal back-edge. Keep its real
++                                    # interpreter owner and progress history;
++                                    # do not manufacture a function entry.
++                                    lines.append(_lle_tail_stmt(
++                                        target_pc24, insn.addr,
++                                        "/* internal JML -> authoritative LLE */"))
++                                    block_terminated = True
++                                    break
+                                 if tgt_name is not None:
+                                     register_call_demand(target_pc24,
+                                                          jml_m, jml_x)
+diff --git a/tests/timing/test_interpreted_tail_continuations.py b/tests/timing/test_interpreted_tail_continuations.py
+index 9225a06..737a912 100644
+--- a/tests/timing/test_interpreted_tail_continuations.py
++++ b/tests/timing/test_interpreted_tail_continuations.py
+@@ -43,6 +43,22 @@ def cases():
+                 result.append(dict(common, name=f'balanced-{fast}-{cross}-{short}',
+                                    code=code, continuations=[(pc+3,1,0)],
+                                    memory={target+i:b for i,b in enumerate(helper)}))
++    # Unnamed same-bank instruction, inside the entry block rather than at a
++    # function root. The JML must return to the interpreter before the helper
++    # call, then resume natively after its real guest return frame is consumed.
++    for fast in (0, 1):
++        pc = 0x808000 if fast else 0x8000
++        helper = (pc & 0xFF0000) | 0x8200
++        for m in (0, 1):
++            for short in (False, True):
++                code = [0xA2,3,0,0x22,0,0x82,pc>>16,0xCA,0xF0,4,
++                        0x5C,3,0x80,pc>>16,0x60 if short else 0x6B]
++                result.append(dict(name=f'internal-{fast}-{m}-{short}', pc=pc,
++                                   code=code, m=m, memsel=fast, status=0,
++                                   instruction_timing=True, short_call=short,
++                                   continuations=[(pc+7,m,0)],
++                                   interpreted_callees=[helper],
++                                   memory={helper:0x1A,helper+1:0x6B}))
+     return result
+ 
+ 
+@@ -72,6 +88,37 @@ class InterpretedTailContinuations(unittest.TestCase):
+                     codegen.set_name_resolver({})
+                     codegen.set_valid_variants({})
+ 
++    def test_internal_backedge_proof(self):
++        from types import SimpleNamespace as N
++        from v2.continuations import internal_interpreted_backedges
++        from snes65816 import LONG
++        root = N(pc=0x8000, m=1, x=0)
++        insn = N(addr=0x8010, m_flag=1, x_flag=0, mnem='JMP', mode=LONG,
++                 operand=0x8003)
++        cfg = N(entry=root, blocks={0:N(successors=[])})
++        pairs = {0:[(insn,[])]}
++        site, target = (0x8010,1,0), (0x8003,1,0)
++        try:
++            codegen.set_name_resolver({})
++            codegen.set_valid_variants({}, authoritative=True)
++            self.assertEqual(internal_interpreted_backedges(pairs,cfg,{site:0,target:0}), {site})
++            for depths in ({site:0}, {site:0,(0x8003,0,0):0},
++                           {site:0,target:2}, {site:2,target:0}, {site:2,target:2}):
++                self.assertFalse(internal_interpreted_backedges(pairs,cfg,depths))
++            for address in (0x8000,0x8012,0x808003):
++                insn.operand=address
++                self.assertFalse(internal_interpreted_backedges(
++                    pairs,cfg,{site:0,(address,1,0):0}))
++            insn.operand=target[0]
++            codegen.set_valid_variants({target[0]:{(1,0)}}, authoritative=True)
++            self.assertFalse(internal_interpreted_backedges(pairs,cfg,{site:0,target:0}))
++            # An alternate width body does not turn this exact target native.
++            codegen.set_valid_variants({target[0]:{(0,0)}}, authoritative=True)
++            self.assertEqual(internal_interpreted_backedges(pairs,cfg,{site:0,target:0}), {site})
++        finally:
++            codegen.set_name_resolver({})
++            codegen.set_valid_variants({})
++
+     def test_complete_and_event_parity(self):
+         clean = {k:v for k,v in os.environ.items() if not k.startswith('SNESRECOMP_')}
+         with tempfile.TemporaryDirectory(prefix='snes-tail-resume-') as temp, patch.dict(
