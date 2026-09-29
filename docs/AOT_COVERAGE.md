@@ -85,7 +85,18 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 345 variants and six continuations
+## Accepted normal-build checkpoint: 345 variants and seven continuations
+
+The `00CE3F:M1X0` change adds instruction timing and the `00CE52:M1X0`
+continuation at local stack depth two. Patch 0034 permits a known interpreted
+JML tail to use the existing owner handoff while retaining local saves.
+`00CE51:M1X0` remains excluded and still executes 3,382 times in the interpreter.
+Both saved title inputs pass. The new continuation executes 4,787 times and
+removes 1,356,971 interpreted instructions, a 12.71% overall reduction and
+99.04% for this graph. The analyzer manifest and cfg are unchanged. See
+[AOT_RECOVERY.md](AOT_RECOVERY.md) for stack observations, validation and limits.
+
+## Previous checkpoint: 345 variants and six continuations
 
 The second bank-00 scan selects instruction timing for `00D0DE:M1X0` and
 adds `00D0F1:M1X0` at proven local stack depth two. Its observed interpreted

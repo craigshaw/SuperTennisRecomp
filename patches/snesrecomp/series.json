@@ -1,7 +1,7 @@
 {
   "base_revision": "a64932f1af958f7e71a728ac1235d6cf911f71a0",
-  "integrated_revision": "5c2c89b1fc9b0fb9583b714a1f9d705520645ffb",
-  "integrated_patch_count": 33,
+  "integrated_revision": "cf5215d157d38526f81ddcf546e3515f019e46d5",
+  "integrated_patch_count": 34,
   "patches": [
     {
       "file": "0001-Recognize-direct-long-call-trampolines.patch",
@@ -134,6 +134,10 @@
     {
       "file": "0033-Time-direct-page-ORA-in-selected-native-bodies.patch",
       "sha256": "a8b01ea4b18bcc5598fe6bef98e7bae89ef4886b946daf49aaf7a2b021ba71f0"
+    },
+    {
+      "file": "0034-Allow-continuation-handoffs-to-known-interpreted-tails.patch",
+      "sha256": "74ec13b623839e901b7b0d842b6b8bb51928581fac596bc101ee72cc4d6a8c55"
     }
   ],
   "patched_files": {
@@ -143,10 +147,10 @@
     "recompiler-rs/src/insn.rs": "14bc167f9bdb98d3d06810433129cdd4974a878476860052f5d57bad923b31da",
     "recompiler/snes65816.py": "bc1f68c1eee311e9871b70f86c024e6cf6733c6ac8dd8257fd9fd7a51948f79d",
     "recompiler/snes_cycles.py": "a44156357d7322b9928ca224e3e15da9950d27f7d934785de3f8a3ebed652d8b",
-    "recompiler/v2/bus_timing.py": "2879f2e10ac1c2622e5bb7ed2c0f673b7b60b23882cf54151704779aff06779f",
+    "recompiler/v2/bus_timing.py": "f691a53a92140c0d2d89bc1650e9bb7b168e5818f20f253efdacf261cef01b0d",
     "recompiler/v2/codegen.py": "b79388fae52fdd78a44e815aa69634588dbfce26516066e717792dd97bebdae3",
     "recompiler/v2/decoder.py": "680b901e9e9cd9eb630bf7f61bde7d9768379a524c3e786108e895906bfbaf7e",
-    "recompiler/v2/emit_function.py": "fee7d61335bf63451dc39f969520d6e9f61facf9081b7c42c33c0ce9016e927e",
+    "recompiler/v2/emit_function.py": "634f6a1a9350b29d8ceaf98190083b922b30678dac29c963d2517205dbfe4ef2",
     "recompiler/v2/event_precision.py": "2a71585c31b61db28dac2879c647ab033a3bca4fd2eda215c2f6900a29bc4545",
     "recompiler/v2/program_analysis.py": "87a84f05444566651ef90783d58e356dc909651d8e053073087820ab9b1cb819",
     "runner/runner.cmake": "21e27ef03dc317a72f0a80c5077e371597fc7c21a4df62262dda2d0d2a1d6f78",
@@ -169,7 +173,7 @@
     "tests/interp816/interp816_test.c": "96f820637d99c31b85164b1c52c56cddf4f22e97c5d3954935538fa4ec754e75",
     "tests/joypad/input_replay_test.c": "83187bc27411c3b5a96d0adab24ed452c9b042ccf9f0011c66f4444447e63965",
     "tests/ppu/ppu_sprite_limit_test.c": "b1dde2dbdc99e0c58b04a717844fd1835bd1b0a57f7643a8f1d98558ccfa84b9",
-    "tests/run_c_tests.sh": "9fe4d2c29d50d7bd8ea8a216725bd16e345ff497f2b137eebdc7ed344e678bb9",
+    "tests/run_c_tests.sh": "ab9727ef5c89ae3784539c95fa2fd519b1537cf83eaa999cbd94f25788501895",
     "tests/runtime_dispatch/rdnmi_open_bus_test.c": "a7d20fe93f3cce95cb37ab8f0ec2d0f779b029f2ef8f362b0849e9514dd93668",
     "tests/test_snes_cycles.py": "e992e134849775f4a9e2ac3683f47193621306fd96beb751f4a0b0d28bce23df",
     "tests/timing/README.md": "ea7c4c8e728d305115533fcab203775da25569457517a950a7108c4225a9688a",
@@ -208,10 +212,11 @@
     "tests/timing/test_stack_instruction_timing.py": "2cde2a105957dc792e689859668a6b42ec1af7c3ffe852c97f91274a11e453ba",
     "tests/timing/test_subtract_rmw_instruction_timing.py": "c7618c1c1e3ac18e243a0d27af1e2dd856a5bea01927757841a00cff4877f4c8",
     "tests/timing/test_word_instruction_timing.py": "e334c19a711ab2335bcf15a6236e67a3ee40fd223d9c0c0824973de126e92442",
-    "recompiler/v2/continuations.py": "aca2b45e04db49132e943a22dacdf803bfa519c88e1a18f649ba191f3c18af4e",
+    "recompiler/v2/continuations.py": "43a5645bce262e49b51eebb0d41155f85353a1cef1a7dd83186bf95c4e25dfdb",
     "tests/timing/test_continuations.py": "7c65ede70725bf5affac373a6512a58d8a7d815eabca3532e57ef350e631f1b4",
     "tests/timing/test_saved_stack_continuations.py": "a31909894243fc667d4e4943d27b8b10bbe30d13079cd1043fbe7e22018a5078",
-    "tests/timing/test_ora_dp_continuations.py": "a2ca0a5585a909f5a962d2812bc3f43d3320c75215403e44dc29850e5cf7a716"
+    "tests/timing/test_ora_dp_continuations.py": "a2ca0a5585a909f5a962d2812bc3f43d3320c75215403e44dc29850e5cf7a716",
+    "tests/timing/test_interpreted_tail_continuations.py": "c0bdb317cecd3396fdcea16936843d2d78bc580743273cc1342ce8689faae404"
   },
   "previous_integrated_revision": "3678d0a6d7036217f26e32f6b9087d2933783690",
   "previous_integrated_patch_count": 12

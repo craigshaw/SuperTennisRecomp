@@ -1,11 +1,117 @@
 # AOT recovery
 
-The accepted normal build generates **345 AOT bodies**, with six validated
-scheduler continuation entries. The previous checkpoint is title `c28c0d7`.
-The shared pin is `5c2c89b`, recorded in `SNESRECOMP_PATCHES.md`. This report
+The accepted normal build generates **345 AOT bodies**, with seven validated
+scheduler continuation entries. The previous checkpoint is title `5eb191a`.
+The shared pin is `cf5215d`, recorded in `SNESRECOMP_PATCHES.md`. This report
 supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: recover the second bank-00 scan, 29 September 2026
+## Latest checkpoint: preserve interpreted tail ownership, 29 September 2026
+
+### Observed path and bounded change
+
+The accepted profile assigns 1,370,188 interpreted instructions to the
+`00CE3F:M1X0` graph. A 650-frame probe of the saved long input observes the
+routine already running in the interpreter at frame 377, entry S=`0FE5`.
+PHX leaves S=`0FE3` and saves X=`017C`. JML at `00CEBE:M1X0` reaches
+`00CE51:M1X0` without changing those saved bytes or the return frame. INY
+then reaches the existing `00CE52:M1X0` loop header. PLX restores S=`0FE5`,
+and RTL returns to `02DECA` with S=`0FE8`. The probe matches the frame control.
+
+The runtime already has the required handoff. `interp_tier_dispatch_tail`
+unwinds to the active interpreter owner while leaving guest state intact.
+Patch 0034 extends the compiler checks to accept this case in explicitly
+selected continuation bodies: a direct JML with a known exact target that
+has no compiled variant. Local stack depth must remain proven and bounded.
+Calls and returns still require zero local depth. Compiled and unresolved
+external tails remain rejected, as do inconsistent joins, over-pulls,
+predecessor IR temporaries and guarded continuation bodies. No runtime source
+or opcode implementation changes are needed.
+
+The title selects instruction timing for `00CE3F:M1X0` and continuation
+`00CE3F:1:0>00CE52:1:0`, at validated local depth two. `00CE51` keeps its
+tracked `force_lle` exclusion and named boundary. No cfg directive, function
+root or exit contract changes. The normal Python analyzer manifest is byte
+identical and passes the lab reader. Generated code outside the selected
+body and continuation table is unchanged. This adds no Mesen hardware claim.
+
+### Execution and measured result
+
+A separate 400-frame candidate probe confirms the actual handoff at frame
+377. The continuation enters with S=`0FE3`, reconstructed entry S=`0FE5`,
+and owner/depth `1/1`. The JML handoff retains those values and `hrv=0`.
+`00CE51` executes in that same interpreter frame, and the compiled loop
+returns to `02DECA` with S=`0FE8` and unwind owner `1`. There is no nested
+interpreter frame at these transfers. This probe also matches its control.
+
+The clean candidate passes the primary 2,125-frame and long 4,816-frame
+inputs. Both frame files are byte identical to the saved controls, with zero
+bailouts, tuple overflow and journal failures. The new continuation commits
+guest work on **4,787 invocations**. All six earlier continuation counts are
+unchanged. The interpreter still records **3,382 executions of `00CE51:M1X0`**,
+exactly matching the baseline.
+
+| Exact work set | Before | After |
+| --- | ---: | ---: |
+| `00CE3F:M1X0` graph | 1,370,188 | 13,217 |
+| Whole long replay | 10,674,386 | 9,317,415 |
+
+This removes **1,356,971 interpreted instructions, or 12.71% overall**, and
+4,410,179 interpreted CPU cycles. It recovers **99.04%** of this graph's
+interpreted work. Counts for the other five bank-00 graphs stay unchanged.
+The accepted selection remains **345 AOT bodies**, now with **41
+instruction-timing entries and seven continuations**. This is more native
+execution within an existing body. The graph's recorded work occurs in
+frames 377 through 1349; the result does not establish a steady gameplay
+frame-rate increase.
+
+The new synthetic suite passes **24 complete and 576 event comparisons**,
+with 562 native continuation entries. It covers local depths zero, two and
+six; a returning interpreted suffix; an interpreted jump back to the native
+loop; RTS/RTL; same-bank and cross-bank JML; SlowROM/FastROM; M changes;
+interpreted starts; refresh, IRQ and NMI. Rejection cases preserve checks on
+compiled tails, saves at calls/returns, inconsistent joins and over-pulls.
+Python v2 passes 403/403 and the full shared C suite passes. Its optional
+DSP-1 firmware test is skipped because the external ROM is not configured.
+No title replay or synthetic test failed.
+
+Fresh normal cfg-only generation emits all five banks with zero cache reuse
+and reproduces all seven candidate C files and the complete manifest. Desktop
+and headless builds pass. The normal generated library passes a final
+4,816-frame comparison with zero capture diagnostics; the normal 180-frame
+neutral check also passes. All seven workflow tests and all 34 patch checks
+pass, as do publication-boundary and whitespace checks. The shared change
+is published and exported as patch 0034.
+
+Three alternating rendered normal-build pairs, after one warm-up each,
+average 3.29848 seconds for the control and 3.23178 seconds for the candidate.
+All three pairs improve and their final images match. This suggests **2.02%
+less local wall time**. It remains a short local benchmark, not a sustained
+gameplay frame-rate result.
+
+### Evidence, limits and next step
+
+Evidence is under `captures/aot-ce3f-20260929`, indexed by
+`captures/aot-ce3f-current.txt` and follow-up records reached through
+`captures/aot-recovery-current.txt` and the previous checkpoint. It contains
+the baseline, both bounded traces, clean candidate, exact profiles, proposal
+review, shared-test logs, normal validation and benchmark. Raw captures remain
+private and immutable. The retained 515-body classification is reused.
+No bulk screen, full input sweep, new Mesen capture, native analyzer rebuild,
+Windows build or manual gameplay was repeated. Unrelated UI and lab files
+are preserved.
+
+The updated graph ranking points to `07D8A5:M1X0`, with 1,844,138 interpreted
+instructions in frames 10 through 1571. It already has an AOT body, but its
+generated scheduler guard sends execution back to the interpreter. Next,
+inspect why that guard exists and trace a bounded invocation before changing
+it. Its PHP/REP setup requires separate status/width and scheduling analysis;
+do not simply remove the guard. The overlapping `00D271`/`00D285`/`00D2A0`
+group has only **139,392 instructions in its union**, not the sum of its three
+rows. It tails to an existing compiled target and remains outside this
+interpreted-tail extension. Keep it separate. Leave `00CE51` excluded, do not
+chase small scan residuals, and do not reopen the parked `00804D` experiment.
+
+## Previous checkpoint: recover the second bank-00 scan, 29 September 2026
 
 ### Observed entry and bounded change
 

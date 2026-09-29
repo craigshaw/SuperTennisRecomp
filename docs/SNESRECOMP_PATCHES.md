@@ -5,9 +5,9 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`5c2c89b1fc9b0fb9583b714a1f9d705520645ffb`](https://github.com/craigshaw/snesrecomp/commit/5c2c89b1fc9b0fb9583b714a1f9d705520645ffb)
+[`cf5215d157d38526f81ddcf546e3515f019e46d5`](https://github.com/craigshaw/snesrecomp/commit/cf5215d157d38526f81ddcf546e3515f019e46d5)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0033. All are published and retained under
+It contains patches 0001 through 0034. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
@@ -59,6 +59,16 @@ The title selects `00D0DE:M1X0` and `00D0F1:M1X0` at depth two, for 345
 bodies and six continuations. Both saved title inputs pass; the normal
 Python analysis manifest remains byte identical. This adds no cfg contract.
 
+Patch 0034 allows selected continuations in bodies with a known interpreted
+JML tail. The exact target must have no emitted variant. Local saves remain
+on the guest stack, and the existing interpreter-owner handoff handles the
+transfer. Calls and returns still require zero local depth; compiled and
+unresolved tails remain excluded from continuation bodies. No runtime source
+changes or exit-state declarations are added. The title selects `00CE3F:M1X0`
+and its `00CE52:M1X0` loop at depth two, keeping `00CE51:M1X0` interpreted.
+The synthetic suite passes 24 complete and 576 event comparisons, with 562
+native entries. The build has 345 bodies and seven continuations.
+
 ## Ordered series
 
 | Patch | Purpose |
@@ -96,6 +106,7 @@ Python analysis manifest remains byte identical. This adds no cfg contract.
 | `0031-Resume-selected-timed-blocks-through-the-owning-scheduler.patch` | Add exact internal block continuations with stack and IR checks, real guest returns, scheduler ownership and event/resume tests. |
 | `0032-Resume-timed-table-scans-with-proven-guest-stack-saves.patch` | Resume at proven local stack depths; add tested table-read, word-save, word DEC, transfer and local JMP instruction timing. |
 | `0033-Time-direct-page-ORA-in-selected-native-bodies.patch` | Enable tested byte and word direct-page ORA timing, including event recovery through saved-stack continuations. |
+| `0034-Allow-continuation-handoffs-to-known-interpreted-tails.patch` | Validate known interpreted JML handoffs with preserved local saves and existing scheduler ownership. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee
@@ -135,9 +146,9 @@ python tools/apply-snesrecomp-patches.py --check
 ```
 
 The tool verifies the complete source at the current pin without applying
-patches. At the older recovery pin or upstream base it applies sixteen or
-twenty-eight patches respectively to a clean checkout. It verifies patch SHA-256
-values and the contents of all 69 affected files against
+patches. At the older recovery pin or upstream base it applies twenty-two or
+thirty-four patches respectively to a clean checkout. It verifies patch SHA-256
+values and the contents of all 76 affected files against
 [`series.json`](../patches/snesrecomp/series.json). Source-file comparisons
 normalise CRLF line endings for Windows; patch files retain their exact bytes.
 An already complete series is verified without writing. An incomplete series
@@ -156,7 +167,7 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
-and selects 40 exact entries for instruction timing. It also selects six
+and selects 41 exact entries for instruction timing. It also selects seven
 validated internal scheduler continuations, separate from function roots.
 The normal output has 345 AOT bodies. The bus-cost selection contains 170
 exact keys, of which 136 emit bodies, including the instruction-timed selections.
@@ -181,10 +192,12 @@ CMP, ADC and accumulator ASL. Patch 0024 adds ordinary direct JSR/JSL and
 immediate ORA. Unknown callee exits still block compiled continuations. External
 branch targets, indirect or special calls, unselected indirect addressing, other word stacks,
 unbalanced local stacks, other stack operations, unselected memory RMW, RTI and block moves remain outside this mode.
-Unsupported selections fail generation. The normal selection uses 40 validated
+Unsupported selections fail generation. The normal selection uses 41 validated
 exact entries, including the arithmetic-loop and word-operation entries below. Direct JML, CPX and INX are
 also supported by patches 0026 and 0027. Patch 0028 supports PHA/PLA with M=1
-and DEX. Stack depth must agree at joins and be zero at calls, tails and returns.
+and DEX. Stack depth must agree at joins and be zero at calls, compiled tails and
+returns. Patch 0034 permits a proven local depth at known interpreted JML
+tails in selected continuation bodies.
 Patch 0029 adds SEC, SBC immediate/absolute, M1 direct-page SBC and M1
 direct-page INC/DEC/ASL/ROL. Other word memory RMW forms remain excluded. Its 134 complete
 and 198 event/resume comparisons cover carry, overflow, decimal subtraction,
