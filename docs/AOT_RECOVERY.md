@@ -1,12 +1,113 @@
 # AOT recovery
 
-The accepted normal build generates **345 AOT bodies**, with four validated
-scheduler continuation entries. The previous checkpoint is title `ab3c2a7`.
-The shared pin remains `03c2c23`, described in
+The accepted normal build generates **345 AOT bodies**, with five validated
+scheduler continuation entries. The previous checkpoint is title `e77d784`.
+The shared pin is `c0629a0`, described in
 `SNESRECOMP_PATCHES.md`. This report supersedes the older handoff in
 `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: resume the two ALU loops, 29 September 2026
+## Latest checkpoint: recover the bank-00 table scan, 29 September 2026
+
+### Observed entry path and bounded change
+
+The saved profile ranked six overlapping bank-00 graphs at 3,183,161
+interpreted instructions. Inspection selected `00CFE8:M1X0`, a large routine
+without the external tail obligations of `00CE3F` and the `00D271` family.
+The primary 1,200-frame native-entry probe records no deadline yield from
+this routine. A separate 650-frame long-input probe finds its first
+interpreted entry at frame 596, PC=`00CFE8:M1X0`, S=`0FE5`, master clock
+212605016, after interpreted JML at `01ACF7`. Thus an interpreted tail entry
+is an observed source of this work. Do not describe it as a proven interrupt
+handoff. Both diagnostic frame comparisons match their saved controls.
+
+The internal `00CFFB:M1X0` loop header has static local stack depth two after
+PHX. Patch 0032 extends the existing continuation mechanism to a proven,
+consistent local depth. The saved bytes remain on the guest stack. The
+generated entry reconstructs the owning entry S without a new guest frame
+or hidden host state. Existing checks still reject inconsistent joins,
+unknown depths, predecessor IR temporaries and external JMP tails. Calls,
+tails and returns must have zero local depth. Local absolute JMP is now
+accepted when its successor stays in the validated graph.
+
+The patch also enables the bounded instruction forms needed by this scan:
+word A and Y saves, register transfers, INY, word accumulator LSR, word
+direct-page DEC, word ORA abs,Y and byte LDA/SBC [dp],Y. Synthetic boundary
+tests caught two issues in the new word ORA path: the high byte must carry
+across a bank boundary, and a large index must still count a page crossing.
+Both are corrected for that selected path. Long indirect pointer reads are
+evaluated once, and word saves and DEC writes use high-byte-first order.
+Other word-read forms keep their existing behavior; these tests do not
+establish new bank-boundary guarantees for those forms.
+
+The title changes only the instruction-timing selection for `00CFE8:M1X0`
+and adds `00CFE8:1:0>00CFFB:1:0`. The full analyzer manifest is byte identical
+and passes the lab reader. Only that routine's generated body and the separate
+continuation table change. No cfg directive, function root or exit contract
+is added. There is no new Mesen hardware claim.
+
+### Measured result and validation
+
+The clean candidate passes the primary 2,125-frame and long 4,816-frame
+replays with byte-identical frame files and zero bailouts, tuple overflow or
+journal failures. The new continuation commits guest CPU work on **1,925
+invocations** in the long input. All four earlier continuation counts remain
+unchanged.
+
+Long-replay interpreted instructions fall from 12,325,028 to **11,050,796**.
+This removes **1,274,232 instructions, or 10.34% overall**, and 4,182,247
+interpreted CPU cycles. The target graph falls from 1,287,707 to 13,475
+instructions, recovering **98.95%** of its interpreted work. The other five
+bank-00 graphs retain their previous counts. There are still **345 AOT
+bodies**, now with **39 instruction-timing entries and five continuations**.
+
+The new synthetic suite passes **104 complete and 704 event comparisons**,
+with 313 native continuation entries. It covers nested saves at depths two
+and six, interpreted starts, compiled and interpreted callees, local JMP,
+RTS/RTL, exact widths, SlowROM/FastROM, pointer wrapping, IRQ, NMI and refresh.
+The previous continuation suite also passes 300 comparisons. Python v2 passes
+403/403 and the full shared C suite passes. The first shared run stopped on
+an obsolete test that rejected now-supported word PHA/PLA. That expectation
+and its companion were changed to reject an unbalanced word save; the final
+suite passes. Earlier probe/test setup failures and boundary failures remain
+in private evidence, including a synthetic callee that collided with a
+reserved fixture address. No title replay failed.
+
+Fresh normal cfg-only generation emits all five banks without cache reuse
+and reproduces all seven candidate C files and the full manifest. Desktop
+and headless builds pass. The normal generated library passes a final
+4,816-frame comparison, and the normal headless 180-frame neutral check
+passes. All seven workflow checks, 32 patch checks, publication boundary
+and whitespace checks pass. The shared fix is exported as patch 0032 and
+pinned to its published commit.
+
+Three alternating rendered normal-build pairs, after one warm-up each,
+average 3.43031 seconds for the control and 3.34161 seconds for the candidate.
+All pairs improve and final images match. This suggests **2.59% less local
+wall time**, with the usual limit of a short local benchmark.
+
+### Evidence, limits and next step
+
+Evidence is under `captures/aot-bank00-20260929`, indexed by
+`captures/aot-bank00-current.txt` and a follow-up record reached through
+`captures/aot-recovery-current.txt`. It includes the baseline, both bounded
+probes, instruction inventory, synthetic diagnostics, clean candidate,
+profiles, proposal review, normal comparison and benchmark. No bulk screen,
+five-replay sweep, native analyzer rebuild, new Mesen capture, Windows build
+or manual gameplay was repeated. Unrelated UI and lab files are preserved.
+
+Reuse the retained classification of 515 unadopted bodies. The next bounded
+candidate is `00D0DE:M1X0`, with 385,874 interpreted instructions. Most of its
+operation requirements are now supported; direct-page ORA at both M widths
+remains outside the selected timing set. Validate that form and its existing
+loop block before assuming it can use the same saved-stack continuation.
+The larger `00CE3F:M1X0` graph still has 1,370,188 interpreted instructions,
+but its external JML to interpreted `00CE51:M1X0` needs separate stack and
+ownership analysis. The saved classification has no passing execution
+evidence for compiling `00CE51`; do not remove its exclusion or invent an
+entry/exit contract. Keep the `00D271`/`00D285`/`00D2A0` overlap separate.
+Do not chase the small residual in `00CFE8` or reopen `00804D` now.
+
+## Previous checkpoint: resume the two ALU loops, 29 September 2026
 
 ### Observed cause and selected entries
 

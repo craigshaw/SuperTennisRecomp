@@ -1,0 +1,480 @@
+From c0629a03a3e1068ad62bfad1b0b8070d7651a9d6 Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Tue, 29 Sep 2026 18:14:12 +0100
+Subject: [PATCH] Resume timed table scans with proven guest stack saves
+
+Allow scheduler continuation entries at statically proven local stack depths and reconstruct their owning entry stack. Add bounded word stack, indexed table-read, local JMP and register-transfer timing support. Preserve high-byte-first saves and word DEC writes, materialize long indirect pointers once, and test word ORA bank carry and crossing cycles.
+
+Synthetic coverage includes 104 complete comparisons and 704 event comparisons, including interpreted entry, nested saves, compiled and interpreted callees, and RTS/RTL returns. Python v2 and shared C suites pass. Unselected generation is unchanged.
+
+Co-authored-by: Codex <codex@openai.com>
+---
+ recompiler/v2/bus_timing.py                   |  53 ++++++--
+ recompiler/v2/codegen.py                      |   3 +-
+ recompiler/v2/continuations.py                |  11 +-
+ recompiler/v2/emit_function.py                |  18 ++-
+ runner/src/snes/aot_bus_timing.h              |   8 ++
+ tests/run_c_tests.sh                          |   1 +
+ tests/timing/fixture.c                        |   4 +
+ tests/timing/test_continuations.py            |   4 +-
+ tests/timing/test_instruction_timing.py       |   2 +-
+ .../timing/test_saved_stack_continuations.py  | 124 ++++++++++++++++++
+ tests/timing/test_stack_instruction_timing.py |   2 +-
+ 11 files changed, 206 insertions(+), 24 deletions(-)
+ create mode 100644 tests/timing/test_saved_stack_continuations.py
+
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+index b994996..4328c03 100644
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -14,6 +14,16 @@ from v2 import continuations
+ BUS_TARGETS_ENV = "SNESRECOMP_EMIT_BUS_TIMING_TARGETS"
+ _selected_bus_timing = ContextVar("selected_bus_timing", default=False)
+ _selected_continuation = ContextVar("selected_continuation", default=False)
++_selected_instruction_timing = ContextVar("selected_instruction_timing", default=False)
++
++
++def instruction_enabled():
++    return _selected_instruction_timing.get()
++
++
++def linear_word_read(insn):
++    """The newly supported word ORA abs,Y uses a 24-bit data address."""
++    return instruction_enabled() and insn.opcode == 0x19 and insn.m_flag == 0
+ 
+ 
+ def continuation_enabled():
+@@ -55,9 +65,11 @@ def scope_function(emitter):
+         key = (((bank & 0xFF) << 16) | (start & 0xFFFF), entry_m, entry_x)
+         token = _selected_bus_timing.set(key in bus_targets())
+         resume_token = _selected_continuation.set(key in continuations.selections())
++        instruction_token = _selected_instruction_timing.set(key in instruction_targets())
+         try:
+             return emitter(rom, bank, start, entry_m, entry_x, **kwargs)
+         finally:
++            _selected_instruction_timing.reset(instruction_token)
+             _selected_continuation.reset(resume_token)
+             _selected_bus_timing.reset(token)
+     return scoped
+@@ -66,7 +78,7 @@ def scope_function(emitter):
+ def validate_instruction_leaf(block_pairs, cfg):
+     """Accept native bodies with tested control flow, arithmetic and status."""
+     from snes65816 import (IMP, ACC, IMM, ABS, ABS_X, ABS_Y, LONG, LONG_X,
+-                          DP, DP_X, DP_Y, REL, REL16)
++                          DP, DP_X, DP_Y, REL, REL16, INDIR_LY)
+     from v2.ir import Call, Goto
+     def direct_long_tail(insn, ops):
+         return (insn.mnem == 'JMP' and insn.mode == LONG
+@@ -95,12 +107,13 @@ def validate_instruction_leaf(block_pairs, cfg):
+                                    and not op.terminal and not op.noreturn
+                                    and op.target is not None for op in ops))
+             supported = (
+-                (insn.mnem in ("RTS", "RTL", "NOP", "CLC", "SEC", "DEY", "INX", "DEX", "TYA", "XBA")
++                (insn.mnem in ("RTS", "RTL", "NOP", "CLC", "SEC", "DEY", "INY", "INX", "DEX", "TYA", "XBA")
+                  and insn.mode == IMP)
+-                or (insn.mnem in ("PHA", "PLA") and insn.mode == IMP
+-                    and insn.m_flag == 1)
+-                or (insn.mnem in ("PHX", "PLX") and insn.mode == IMP
++                or (insn.mnem in ("PHA", "PLA") and insn.mode == IMP)
++                or (insn.mnem in ("PHX", "PLX", "PHY", "PLY") and insn.mode == IMP
+                     and insn.x_flag == 0)
++                or (insn.mnem in ("TXA", "TAX", "TAY") and insn.mode == IMP
++                    and insn.m_flag == 0 and insn.x_flag == 0)
+                 # Index-width changes need separate narrowing/resume support.
+                 or (insn.mnem in ("REP", "SEP") and insn.mode == IMM
+                     and not (insn.operand & 0x10))
+@@ -108,17 +121,27 @@ def validate_instruction_leaf(block_pairs, cfg):
+                                   "CMP", "ADC", "AND", "EOR", "BIT")
+                     and insn.mode in data_modes)
+                 or (insn.mnem == "ORA" and insn.mode == IMM)
++                or (insn.mnem == "ORA" and insn.mode == ABS_Y and insn.m_flag == 0)
++                or (insn.mnem in ("LDA", "SBC") and insn.mode == INDIR_LY
++                    and insn.m_flag == 1 and insn.x_flag == 0)
+                 or (insn.mnem == "CPX" and insn.mode in (IMM, DP, ABS))
+                 or (insn.mnem == "SBC" and insn.mode in (IMM, ABS))
+                 or (insn.mnem == "SBC" and insn.mode == DP)
+                 # Only these tested word RMW forms use reverse byte writes.
+-                or (insn.mnem in ("ROL", "LSR") and insn.mode == DP
++                or (insn.mnem in ("ROL", "LSR", "DEC") and insn.mode == DP
+                     and insn.m_flag == 0)
+                 or (insn.mnem in ("INC", "DEC", "ASL", "ROL") and insn.mode == DP
+                     and insn.m_flag == 1)
+                 or (insn.mnem in ("ASL", "INC") and insn.mode == ACC)
+                 or (insn.mnem == "ROR" and insn.mode == ACC and insn.m_flag == 0)
++                or (insn.mnem == "LSR" and insn.mode == ACC and insn.m_flag == 0)
+                 or (insn.mnem in branches and insn.mode in (REL, REL16))
++                or (insn.mnem == "JMP" and insn.mode == ABS
++                    and len(successors) == 1 and successors[0] in block_pairs
++                    and any(isinstance(op, Goto) for op in ops)
++                    and not getattr(insn, 'dispatch_entries', None)
++                    and not getattr(insn, 'dispatch_runtime', False)
++                    and not getattr(insn, 'return_trampoline', False))
+                 or direct_call or direct_long_tail(insn, ops))
+             if not supported:
+                 raise ValueError(f"instruction timing does not yet support {insn.mnem} at {insn.addr:06X}")
+@@ -134,12 +157,12 @@ def validate_instruction_leaf(block_pairs, cfg):
+         depth = depths[key]
+         for insn, ops in block_pairs[key]:
+             if insn.mnem == "PHA":
+-                depth += 1
++                depth += 1 if insn.m_flag else 2
+             elif insn.mnem == "PLA":
+-                depth -= 1
+-            elif insn.mnem == "PHX":
++                depth -= 1 if insn.m_flag else 2
++            elif insn.mnem in ("PHX", "PHY"):
+                 depth += 2
+-            elif insn.mnem == "PLX":
++            elif insn.mnem in ("PLX", "PLY"):
+                 depth -= 2
+             if depth < 0:
+                 raise ValueError("instruction timing cannot pull the caller's frame")
+@@ -184,6 +207,8 @@ class InstructionTimingLines(BusTimingLines):
+     def append(self, line):
+         line = re.sub(r"\bcpu_(read|write)(8|16)\(cpu,\s*",
+                       lambda m: f"cpu_aot_insn_{m[1]}{m[2]}(cpu, &_aot_timing, ", line)
++        if getattr(self, "linear_word_read", False):
++            line = line.replace("cpu_aot_insn_read16(", "cpu_aot_insn_read16_linear(")
+         if getattr(self, "reverse_word_write", False):
+             line = line.replace("cpu_aot_insn_write16(",
+                                 "cpu_aot_insn_write16_reverse(")
+@@ -193,11 +218,13 @@ class InstructionTimingLines(BusTimingLines):
+ 
+     def instruction(self, insn, cycles):
+         self.pc = insn.addr & 0xFFFFFF
+-        # Word ROL/LSR dp and PHX write high byte before low byte.
++        self.linear_word_read = linear_word_read(insn)
++        # Selected word RMW and register saves write high byte first.
+         # Keep ordinary stores and unselected generation unchanged.
+         self.reverse_word_write = (
+-            (insn.m_flag == 0 and insn.opcode in (0x26, 0x46))
+-            or (insn.x_flag == 0 and insn.mnem == "PHX"))
++            (insn.m_flag == 0 and (insn.opcode in (0x26, 0x46, 0xC6)
++                                  or insn.mnem == "PHA"))
++            or (insn.x_flag == 0 and insn.mnem in ("PHX", "PHY")))
+         self.extend([
+             "if (interp_bridge_lle_instruction_boundary_reached(cpu)) {",
+             f"  return interp_bridge_lle_yield_unwind(cpu, 0x{self.pc:06X}u);",
+diff --git a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+index 4940ce5..c420b82 100644
+--- a/recompiler/v2/codegen.py
++++ b/recompiler/v2/codegen.py
+@@ -569,7 +569,8 @@ def _emit_write(op: Write) -> List[str]:
+ 
+ 
+ def _bus_address_once(seg, bank, addr):
+-    if (bus_timing.enabled() and seg.kind == SegKind.DP_INDIRECT_LONG
++    if ((bus_timing.enabled() or bus_timing.instruction_enabled())
++            and seg.kind == SegKind.DP_INDIRECT_LONG
+             and seg.index is not None):
+         # Both bank/offset expressions otherwise evaluate the same pointer
+         # reads. Materialise once so the pointer contributes three bus bytes.
+diff --git a/recompiler/v2/continuations.py b/recompiler/v2/continuations.py
+index 59f98eb..e37cb19 100644
+--- a/recompiler/v2/continuations.py
++++ b/recompiler/v2/continuations.py
+@@ -4,6 +4,7 @@ import re
+ from dataclasses import fields, is_dataclass
+ 
+ from v2.ir import Value
++from snes65816 import ABS
+ 
+ ENV = "SNESRECOMP_EMIT_CONTINUATIONS"
+ 
+@@ -45,18 +46,19 @@ def _values(value):
+ 
+ 
+ def validate(points, block_pairs, depths, graph, entry_s_offset):
+-    """Require balanced block entries and no host temporaries from a predecessor."""
++    """Require a proven local stack depth and no predecessor host temporaries."""
+     if entry_s_offset or graph.const_z_folds:
+         raise ValueError("continuations require plain stack entries and no folded branches")
+     keys = {(k.pc, k.m, k.x): k for k in block_pairs}
+     for point in points:
+-        if point not in keys or depths.get(keys[point]) != 0:
+-            raise ValueError(f"continuation {point} is not a balanced exact block entry")
++        depth = depths.get(keys.get(point))
++        if depth is None or not 0 <= depth < 0x10000:
++            raise ValueError(f"continuation {point} is not a proven exact block entry")
+     for pairs in block_pairs.values():
+         defined = set()
+         for insn, ops in pairs:
+             # External tail obligations need a separate continuation contract.
+-            if insn.mnem == "JMP":
++            if insn.mnem == "JMP" and insn.mode != ABS:
+                 raise ValueError("continuations do not yet support JMP tails")
+             for op in ops:
+                 for field in fields(op):
+@@ -66,3 +68,4 @@ def validate(points, block_pairs, depths, graph, entry_s_offset):
+                 out = getattr(op, "out", None)
+                 if isinstance(out, Value):
+                     defined.add(out)
++    return {point: depths[keys[point]] for point in points}
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index 096d9e1..7f450a3 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -149,8 +149,11 @@ def _dynamic_charge_lines(insn, speed_expr: str = "8",
+                 f"cpu->master_cycles += {speed_expr}; }}"
+                 f"  /* abs,X read page-cross */")
+         elif mode == _MODE_ABS_Y:
++            # Keep legacy modes unchanged; the new timed word ORA also
++            # counts a crossing when a large index carries into another bank.
++            page_mask = '0xFFFF00' if bus_timing.linear_word_read(insn) else '0xFF00'
+             out.append(
+-                f"if ((0x{base:04X} & 0xFF00) != ((0x{base:04X} + cpu->Y) & 0xFF00))"
++                f"if ((0x{base:04X} & {page_mask}) != ((0x{base:04X} + cpu->Y) & {page_mask}))"
+                 f" {{ {audit_call}cpu->cycles += 1; "
+                 f"cpu->master_cycles += {speed_expr}; }}"
+                 f"  /* abs,Y read page-cross */")
+@@ -851,7 +854,8 @@ def emit_function(rom: bytes, bank: int, start: int,
+     if instruction_timing:
+         depths = bus_timing.validate_instruction_leaf(block_per_insn_ir, cfg)
+         if resume_points:
+-            continuations.validate(resume_points, block_per_insn_ir, depths, graph, entry_s_offset)
++            resume_depths = continuations.validate(
++                resume_points, block_per_insn_ir, depths, graph, entry_s_offset)
+ 
+     # ── Non-local-return idiom detection ────────────────────────────────
+     # A basic block is an NLR-block if its IR has the shape
+@@ -2183,6 +2187,16 @@ def emit_function(rom: bytes, bank: int, start: int,
+             f'  /* entry_s_offset:{entry_s_offset} — caller left stack imbalanced */')
+     else:
+         src.append(f'  uint16 _entry_s = cpu->S;')
++    if resume_points and any(resume_depths.values()):
++        # Local saves remain on the guest stack across interpreter execution.
++        # Reconstruct the owning frame's entry S without touching those bytes.
++        src.append('  switch ((_aot_resume << 2) | (cpu->m_flag << 1) | cpu->x_flag) {')
++        for (pc, m, x), depth in sorted(resume_depths.items()):
++            if depth:
++                src.append(f'    case 0x{((pc << 2) | (m << 1) | x):08X}u: '
++                           f'_entry_s = (uint16)(cpu->S + {depth}u); break;')
++        src.append('    default: break;')
++        src.append('  }')
+     # Option-1 cpu->S return-frame ABI (see IMPROVEMENTS.md): capture whether
+     # a paired host-C caller exists at entry. RTS/RTL may host-return NORMAL
+     # only when _hrv==1 AND the stack is balanced (cpu->S == _entry_s);
+diff --git a/runner/src/snes/aot_bus_timing.h b/runner/src/snes/aot_bus_timing.h
+index 8d25b57..d404e71 100644
+--- a/runner/src/snes/aot_bus_timing.h
++++ b/runner/src/snes/aot_bus_timing.h
+@@ -85,6 +85,14 @@ static inline uint16 cpu_aot_insn_read16(CpuState *cpu, CpuAotInstructionTiming
+     g_aot_instruction_read_active = saved;
+     return value;
+ }
++static inline uint16 cpu_aot_insn_read16_linear(CpuState *cpu,
++                                               CpuAotInstructionTiming *timing,
++                                               uint8 bank, uint16 addr) {
++    uint32 next = ((((uint32)bank << 16) | addr) + 1u) & 0xFFFFFFu;
++    uint16 low = cpu_aot_insn_read8(cpu, timing, bank, addr);
++    return low | ((uint16)cpu_aot_insn_read8(cpu, timing, (uint8)(next >> 16),
++                                          (uint16)next) << 8);
++}
+ static inline void cpu_aot_insn_write8(CpuState *cpu, CpuAotInstructionTiming *timing,
+                                       uint8 bank, uint16 addr, uint8 value) {
+     cpu_aot_insn_bus_extra(timing, bank, addr, 1);
+diff --git a/tests/run_c_tests.sh b/tests/run_c_tests.sh
+index 6d86669..cafe1a9 100644
+--- a/tests/run_c_tests.sh
++++ b/tests/run_c_tests.sh
+@@ -101,6 +101,7 @@ python3 "$ROOT/tests/timing/test_stack_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_subtract_rmw_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_word_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_continuations.py"
++python3 "$ROOT/tests/timing/test_saved_stack_continuations.py"
+ 
+ echo "=== DSP-1 bus/core shell ==="
+ "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+diff --git a/tests/timing/fixture.c b/tests/timing/fixture.c
+index 0473f35..eb9ee83 100644
+--- a/tests/timing/fixture.c
++++ b/tests/timing/fixture.c
+@@ -156,6 +156,10 @@ int main(int argc, char **argv) {
+             event_body = test->body;
+             interp_bridge_set_continuations(test->continuations, test->continuation_count);
+         }
++        else if (!strcmp(argv[2], "event-continuation")) {
++            /* Start interpreted, including local saves before the first entry. */
++            interp_bridge_set_continuations(test->continuations, test->continuation_count);
++        }
+         else if (strcmp(argv[2], "event-interp")) return 2;
+         g_c.S = 0x01FF;
+         const uint8 scheduler[] = {0x22, test->pc, test->pc >> 8, test->pc >> 16,
+diff --git a/tests/timing/test_continuations.py b/tests/timing/test_continuations.py
+index aed01ad..adb7383 100644
+--- a/tests/timing/test_continuations.py
++++ b/tests/timing/test_continuations.py
+@@ -63,12 +63,12 @@ class Continuations(unittest.TestCase):
+                           '008000:1:0>008003:1:0,008010:1:0>008003:1:0'):
+             with self.subTest(selection=selection), patch.dict(os.environ, {continuations.ENV:selection}):
+                 with self.assertRaises(ValueError): continuations.selections()
+-        # Mid-instruction, wrong width, nonzero local stack, absent timing,
++        # Mid-instruction, wrong width, non-block entry, absent timing,
+         # and a JMP tail must not become continuation entries.
+         for code, point, timed in [
+                 ([0xA2,3,0,0xCA,0xD0,0xFD,0x6B], '008004:1:0', True),
+                 ([0xA2,3,0,0xCA,0xD0,0xFD,0x6B], '008003:0:0', True),
+-                ([0x48,0xD0,0,0x68,0x6B], '008003:1:0', True),
++                ([0x48,0xD0,0,0x68,0x6B], '008004:1:0', True),
+                 ([0xA2,3,0,0xCA,0xD0,0xFD,0x6B], '008003:1:0', False),
+                 ([0xA2,3,0,0xCA,0xD0,0xFD,0x5C,0,0x81,0], '008003:1:0', True)]:
+             with patch.dict(os.environ, {continuations.ENV:f'008000:1:0>{point}',
+diff --git a/tests/timing/test_instruction_timing.py b/tests/timing/test_instruction_timing.py
+index da21ec4..24da013 100644
+--- a/tests/timing/test_instruction_timing.py
++++ b/tests/timing/test_instruction_timing.py
+@@ -136,7 +136,7 @@ class InstructionTiming(unittest.TestCase):
+         with patch.dict(os.environ, {"SNESRECOMP_EMIT_BUS_TIMING": "1",
+                                     bus_timing.INSTRUCTION_ENV: "008000:1:0"}):
+             for code in ([0xFC, 0x10, 0x80, 0x6B], [0x22, 0, 0x10, 0, 0x6B],
+-                         [0xC2, 0x20, 0x48, 0x68, 0x6B],
++                         [0xC2, 0x20, 0x48, 0x6B],
+                          [0xB1, 0x40, 0x6B], [0x40], [0xEE, 0, 0x10, 0x6B]):
+                 with self.assertRaises(ValueError):
+                     timing.emit_function(bytes(code) + bytes(32768-len(code)),
+diff --git a/tests/timing/test_saved_stack_continuations.py b/tests/timing/test_saved_stack_continuations.py
+new file mode 100644
+index 0000000..933fabe
+--- /dev/null
++++ b/tests/timing/test_saved_stack_continuations.py
+@@ -0,0 +1,124 @@
++"""Timed table scans can resume with statically proven guest register saves."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++from unittest.mock import patch
++
++import run as timing
++
++
++def cases():
++    result = []
++    for fast in (0, 1):
++        common = dict(instruction_timing=True, status=0,
++                      pc=0x808000 if fast else 0x8000, memsel=fast)
++        for value in (0, 1, 0x8000, 0xFFFF):
++            for d in (0, 1, 0xFFBF):
++                address = (d + 0x40) & 65535
++                result.append(dict(common, name=f'dec-{fast}-{value}-{d}', m=0, d=d,
++                                   code=[0xC6,0x40,0x6B],
++                                   memory={address:value&255,(address+1)&65535:value>>8}))
++        for xf in (0, 1):
++            for y in (0x7F, 0xFF, 0x7FFF, 0xFFFF):
++                result.append(dict(common, name=f'iny-{fast}-{xf}-{y}', xf=xf,
++                                   y=y if not xf else y&255, code=[0xC8,0x6B]))
++        for value in (0, 1, 0x8000, 0xFFFF):
++            result.append(dict(common, name=f'transfers-{fast}-{value}', m=0, x=value,
++                               code=[0x8A,0x48,0x4A,0xA8,0x5A,0xAA,0x7A,0x68,
++                                     0x8D,0,0x10,0x8E,2,0x10,0x8C,4,0x10,0x6B]))
++        for y in (0, 1, 0xFF, 0xFFFF):
++            address = 0x7EFFFF+y
++            result.append(dict(common, name=f'ora-{fast}-{y}', m=0, y=y, db=0x7E,
++                               code=[0xA9,1,0,0x19,0xFF,0xFF,0x6B],
++                               memory={address:0x80,(address+1)&0xFFFFFF:0x40}))
++        result.append(dict(common, name=f'ora-wrap-{fast}', m=0, db=0xFF,
++                           code=[0xA9,1,0,0x19,0xFF,0xFF,0x6B],
++                           memory={0xFFFFFF:0x80,0:0x40}))
++        for opcode in (0xB7, 0xF7):  # LDA/SBC [dp],Y.
++            for d in (0, 1, 0xFFBF):
++                for y in (0, 1, 0xFFFF):
++                    pointer = (d+0x40)&65535
++                    memory = {pointer:0xFF,(pointer+1)&65535:0xFF,
++                              (pointer+2)&65535:0x7E,0x7EFFFF+y:0x19}
++                    result.append(dict(common, name=f'indirect-{fast}-{opcode}-{d}-{y}',
++                                       d=d, y=y, memory=memory,
++                                       code=[0xA9,0x80,0x38,opcode,0x40,0x6B]))
++        result.append(dict(common, name=f'indirect-decimal-{fast}', status=9,
++                           memory={0x40:0,0x41:0x10,0x42:0,0x1000:0x19},
++                           code=[0xA9,0x80,0xF7,0x40,0x6B]))
++        # Three iterations, each with nested Y/A saves. The selected entries
++        # have depths two and six inside X/Y/A saves. Local JMP closes the loop.
++        code = [0xDA,0xA0,3,0,0xC2,0x20,0x5A,0x48,0x80,0,0xA9,1,0x80,0x4A,
++                0x68,0x7A,0x88,0xF0,3,0x4C,6,0x80,0xE2,0x20,0xFA,0x6B]
++        for short in (False, True):
++            result.append(dict(common, name=f'saved-loop-{fast}-{short}', x=0xABCD,
++                               code=code[:-1]+[0x60 if short else 0x6B],
++                               short_call=short,
++                               continuations=[(common['pc']+6,0,0),
++                                              (common['pc']+10,0,0)]))
++        for compiled in (False, True):
++            # $008100 is reserved by the underlying bridge fixture's fake AOT.
++            target = (common['pc'] & 0xFF0000) | 0x8200
++            result.append(dict(common, name=f'saved-call-{fast}-{compiled}', x=0xABCD,
++                               code=code[:-1]+[0x22,0,0x82,target>>16,0x6B],
++                               continuations=[(common['pc']+6,0,0)],
++                               memory={target:0xEA,target+1:0x6B},
++                               **{'callees' if compiled else 'interpreted_callees':[target]}))
++    return result
++
++
++class SavedStackContinuations(unittest.TestCase):
++    def test_fail_closed(self):
++        for code in ([0xC2,0x20,0x48,0xE2,0x20,0x68,0x6B],
++                     [0x5A,0x6B], [0x7A,0x6B],
++                     [0xC2,0x20,0xB7,0x40,0x6B],
++                     [0xC2,0x20,0x6E,0x40,0,0x6B]):
++            with patch.dict(os.environ, {'SNESRECOMP_EMIT_INSTRUCTION_TIMING':'008000:1:0'}):
++                with self.subTest(code=code), self.assertRaises(ValueError):
++                    timing.emit_function(bytes(code)+bytes(32768-len(code)),
++                                         bank=0,start=0x8000,entry_m=1,entry_x=0)
++
++    def test_complete_and_event_parity(self):
++        with tempfile.TemporaryDirectory(prefix='snes-saved-stack-') as temp, patch.dict(
++                os.environ, {k:v for k,v in os.environ.items()
++                             if not k.startswith('SNESRECOMP_')}, clear=True):
++            tests=cases(); binary=timing.build(Path(temp),os.environ.get('CC','cc'),tests)
++            def run(i,tier,*args):
++                p=subprocess.run([str(binary),str(i),tier,*args],capture_output=True,
++                                 text=True,timeout=10)
++                self.assertEqual(p.returncode,0,p.stdout+p.stderr)
++                return json.loads(p.stdout)
++            for i,c in enumerate(tests):
++                with self.subTest(case=c['name']):
++                    self.assertEqual(run(i,'interp'),run(i,'aot'))
++            checks=entries=0
++            # Every new instruction family and each saved-stack loop variant.
++            selected=[i for i,c in enumerate(tests) if
++                      c['name'].startswith(('saved-', 'ora-', 'transfers-', 'indirect-decimal-'))
++                      or c['name'].endswith(('-65471-65535','-1-1','-0-65535','-1-255','-0-65471'))]
++            for i in selected:
++                for event in ('63','100','180','300','refresh','beam-nmi','irq:120'):
++                    for resume in ((),('repeat',)):
++                        pair=[run(i,tier,event,*resume) for tier in ('event-interp','event-aot')]
++                        entries+=pair[1].pop('continuation_entries',0)
++                        pair[0].pop('continuation_entries',None)
++                        with self.subTest(case=tests[i]['name'],event=event,resume=resume):
++                            self.assertEqual(*pair)
++                        checks+=1
++            for i,c in enumerate(tests):
++                if not c.get('continuations'): continue
++                for event in ('63','180','refresh','irq:120'):
++                    pair=[run(i,tier,event,'repeat') for tier in ('event-interp','event-continuation')]
++                    entries+=pair[1].pop('continuation_entries')
++                    pair[0].pop('continuation_entries')
++                    with self.subTest(case=c['name'],event=event,start='interpreted'):
++                        self.assertEqual(*pair)
++                    checks+=1
++            self.assertGreater(entries,0)
++            print(f'Saved stack: {len(tests)} complete, {checks} event comparisons, {entries} native entries')
++
++
++if __name__=='__main__': unittest.main()
+diff --git a/tests/timing/test_stack_instruction_timing.py b/tests/timing/test_stack_instruction_timing.py
+index 744b6fd..c3cb300 100644
+--- a/tests/timing/test_stack_instruction_timing.py
++++ b/tests/timing/test_stack_instruction_timing.py
+@@ -44,7 +44,7 @@ class StackInstructionTiming(unittest.TestCase):
+             [0x48, 0x6B],  # Returning with live local data.
+             [0x48, 0xD0, 0xFD, 0x68, 0x6B],  # Growing stack loop.
+             [0xAD, 0, 0x10, 0xD0, 1, 0x48, 0x68, 0x6B],  # Unequal join.
+-            [0xC2, 0x20, 0x48, 0x68, 0x6B],  # Untested word stack.
++            [0xC2, 0x20, 0x48, 0x6B],  # Word save remains at return.
+             [0x48, 0x22, 0, 0x81, 0, 0x68, 0x6B],  # Live data across call.
+         ]
+         with patch.dict(os.environ, {"SNESRECOMP_EMIT_INSTRUCTION_TIMING": "008000:1:0"}):
+-- 
+2.54.0 (Apple Git-157)
+

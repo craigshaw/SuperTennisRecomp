@@ -85,7 +85,19 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 345 variants and four continuations
+## Accepted normal-build checkpoint: 345 variants and five continuations
+
+The bank-00 scan change selects instruction timing for `00CFE8:M1X0` and
+adds `00CFFB:M1X0` as a continuation at proven local stack depth two. Its
+observed interpreted entry comes from a JML tail transfer. The shared patch
+adds the required tested instruction forms and supports preserved local
+saves. The long replay executes the new entry 1,925 times and removes
+1,274,232 interpreted instructions, a 10.34% reduction. Both saved inputs,
+shared suites and fresh normal generation pass. Three normal-build pairs
+suggest 2.59% less local wall time. See
+[AOT_RECOVERY.md](AOT_RECOVERY.md) for exact scope, failures, evidence and limits.
+
+## Previous checkpoint: 345 variants and four continuations
 
 The second 29 September continuation selection adds `01EC64:M1X0` inside
 `01EBAE:M1X0` and `01ED81:M1X0` inside `01ECCB:M1X0`. Direct traces confirm
