@@ -5,9 +5,9 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`c0629a03a3e1068ad62bfad1b0b8070d7651a9d6`](https://github.com/craigshaw/snesrecomp/commit/c0629a03a3e1068ad62bfad1b0b8070d7651a9d6)
+[`5c2c89b1fc9b0fb9583b714a1f9d705520645ffb`](https://github.com/craigshaw/snesrecomp/commit/5c2c89b1fc9b0fb9583b714a1f9d705520645ffb)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0032. All are published and retained under
+It contains patches 0001 through 0033. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
@@ -52,6 +52,13 @@ The new synthetic suite passes 104 complete and 704 event comparisons,
 including 313 native entries, interpreted starts, nested saves, calls and
 RTS/RTL. Python v2, shared C, both title inputs and normal generation pass.
 
+Patch 0033 enables direct-page ORA at both M widths in selected instruction
+timing, using the existing opcode and continuation implementation. Its tests
+pass 100 complete and 240 event comparisons, including 92 native entries.
+The title selects `00D0DE:M1X0` and `00D0F1:M1X0` at depth two, for 345
+bodies and six continuations. Both saved title inputs pass; the normal
+Python analysis manifest remains byte identical. This adds no cfg contract.
+
 ## Ordered series
 
 | Patch | Purpose |
@@ -88,6 +95,7 @@ RTS/RTL. Python v2, shared C, both title inputs and normal generation pass.
 | `0030-Time-selected-word-shifts-and-local-X-saves.patch` | Add selected word ROL/LSR/SBC, accumulator ROR and local X0 PHX/PLX, with high-byte-first memory and stack writes. |
 | `0031-Resume-selected-timed-blocks-through-the-owning-scheduler.patch` | Add exact internal block continuations with stack and IR checks, real guest returns, scheduler ownership and event/resume tests. |
 | `0032-Resume-timed-table-scans-with-proven-guest-stack-saves.patch` | Resume at proven local stack depths; add tested table-read, word-save, word DEC, transfer and local JMP instruction timing. |
+| `0033-Time-direct-page-ORA-in-selected-native-bodies.patch` | Enable tested byte and word direct-page ORA timing, including event recovery through saved-stack continuations. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee
@@ -148,10 +156,10 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
-and selects 39 exact entries for instruction timing. It also selects five
+and selects 40 exact entries for instruction timing. It also selects six
 validated internal scheduler continuations, separate from function roots.
 The normal output has 345 AOT bodies. The bus-cost selection contains 170
-exact keys, of which 136 emit bodies with corrected costs and block timing.
+exact keys, of which 136 emit bodies, including the instruction-timed selections.
 The other 34 remain interpreted under the validated cfg exclusions and exit
 proofs. Preserve this selection with the cfg; see [the recovery report](AOT_RECOVERY.md).
 No profile manifest is required. Global bus timing remains disabled, and
@@ -173,7 +181,7 @@ CMP, ADC and accumulator ASL. Patch 0024 adds ordinary direct JSR/JSL and
 immediate ORA. Unknown callee exits still block compiled continuations. External
 branch targets, indirect or special calls, unselected indirect addressing, other word stacks,
 unbalanced local stacks, other stack operations, unselected memory RMW, RTI and block moves remain outside this mode.
-Unsupported selections fail generation. The normal selection uses 39 validated
+Unsupported selections fail generation. The normal selection uses 40 validated
 exact entries, including the arithmetic-loop and word-operation entries below. Direct JML, CPX and INX are
 also supported by patches 0026 and 0027. Patch 0028 supports PHA/PLA with M=1
 and DEX. Stack depth must agree at joins and be zero at calls, tails and returns.

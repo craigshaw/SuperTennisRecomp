@@ -1,12 +1,100 @@
 # AOT recovery
 
-The accepted normal build generates **345 AOT bodies**, with five validated
-scheduler continuation entries. The previous checkpoint is title `e77d784`.
-The shared pin is `c0629a0`, described in
-`SNESRECOMP_PATCHES.md`. This report supersedes the older handoff in
-`AOT_BATCH_SCREENING.md`.
+The accepted normal build generates **345 AOT bodies**, with six validated
+scheduler continuation entries. The previous checkpoint is title `c28c0d7`.
+The shared pin is `5c2c89b`, recorded in `SNESRECOMP_PATCHES.md`. This report
+supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: recover the bank-00 table scan, 29 September 2026
+## Latest checkpoint: recover the second bank-00 scan, 29 September 2026
+
+### Observed entry and bounded change
+
+The retained exact-key profile assigns 385,874 interpreted instructions to
+`00D0DE:M1X0`. A 650-frame probe of the existing long input observes its first
+interpreted entry at frame 633, PC=`00D0DE:M1X0`, S=`0FE2`, master clock
+225826354. The previous interpreted instruction is JML at `01C119` to
+`00D0DE`. The probe matches the saved frame control. This establishes an
+interpreted tail entry in that capture, not an AOT interrupt handoff.
+
+The normal Python generator validates the existing `00D0F1:M1X0` loop block
+at local stack depth two after PHX. The saved-stack continuation mechanism
+from patch 0032 already supports it. Patch 0033 only enables direct-page
+ORA at both accumulator widths in the instruction-timing gate and adds
+synthetic tests. No scheduler or opcode implementation changes are needed.
+The title selects `00D0DE:M1X0` for instruction timing and adds
+`00D0DE:1:0>00D0F1:1:0` as the sixth continuation.
+
+The full analyzer manifest is byte identical and passes the lab reader.
+All generated code outside the target body and continuation table is unchanged.
+No cfg directive, function root or exit contract changes. This experiment
+makes no new Mesen hardware claim and needs no new reference captures.
+
+### Measured work and checks
+
+The clean candidate passes the primary 2,125-frame and long 4,816-frame
+inputs. Both frame files are byte identical to their accepted controls,
+with zero bailouts, tuple overflow and journal failures. The new continuation
+commits guest CPU work on **1,352 invocations** in the long replay. All five
+earlier continuation counts are unchanged.
+
+| Exact work set | Before | After |
+| --- | ---: | ---: |
+| `00D0DE:M1X0` graph | 385,874 | 9,464 |
+| Whole long replay | 11,050,796 | 10,674,386 |
+
+This removes **376,410 interpreted instructions, or 3.41% overall**, and
+1,162,217 interpreted CPU cycles. It recovers **97.55%** of the target graph's
+remaining interpreted work. The other five bank-00 graph counts are unchanged.
+The build still has **345 bodies**, now with **40 instruction-timing entries
+and six continuations**. These are execution gains within an existing body.
+
+The new synthetic tests pass **100 complete and 240 event comparisons**, with
+92 native continuation entries. They cover both M widths, the hidden A high
+byte, C/V/D preservation, direct-page alignment penalties and 16-bit wrap,
+SlowROM/FastROM, saved X, RTS/RTL, interpreted starts, M transitions, refresh,
+IRQ and NMI. The first derived source-scope check omitted the generated group
+comment from its comparison boundary. The corrected check confirms that
+unrelated C is unchanged; no source or title replay failure resulted.
+
+Python v2 passes 403/403 and the full shared C suite passes, including the
+existing continuation suites. The optional DSP-1 firmware test is skipped
+because its external ROM is not configured. Fresh normal cfg-only generation
+emits all five banks with zero cache reuse and reproduces all seven candidate
+C files and the full manifest. Both hosts build. The normal generated library
+passes a final 4,816-frame comparison with zero capture diagnostics, and the
+normal 180-frame neutral check passes. All seven workflow tests and all 33
+patch checks pass, as do publication-boundary and whitespace checks. Patch
+0033 is exported and the shared commit is published.
+
+Three alternating rendered normal-build pairs, after one warm-up each,
+average 3.37169 seconds for the control and 3.34686 seconds for the candidate.
+Two pairs improve and one regresses slightly; all final images match. The
+mean is **0.74% lower**, but this small, noisy sample does not establish a
+stable wall-time improvement. The measured interpreter-work reduction is
+the stronger result.
+
+### Evidence, limits and next step
+
+Private evidence is under `captures/aot-d0de-20260929`, indexed by
+`captures/aot-d0de-current.txt` and a follow-up record reached through
+`captures/aot-recovery-current.txt`. It retains the original baseline,
+bounded trace, clean candidate, exact profiles, proposal review, shared-test
+logs, normal generation comparison and benchmark. No bulk screen, five-input
+sweep, native analyzer rebuild, Windows build, manual gameplay or new Mesen
+capture was repeated. Unrelated UI and lab files are preserved.
+
+Reuse the retained classification of 515 unadopted bodies. The next larger
+candidate is `00CE3F:M1X0`, still accounting for 1,370,188 interpreted
+instructions. Its external JML to interpreted `00CE51:M1X0` blocks the current
+continuation rules. First trace that transfer and its guest stack/return owner
+with the existing long input. Then determine whether a narrow, game-neutral
+tail handoff can preserve that owner. Keep `00CE51` interpreted unless separate
+execution evidence justifies promotion; its saved classification has no
+passing compiled evidence. Do not invent an exit or continuation contract.
+Keep the overlapping `00D271`/`00D285`/`00D2A0` family separate. Do not chase
+the small `00CFE8` or `00D0DE` residuals or reopen `00804D`.
+
+## Previous checkpoint: recover the bank-00 table scan, 29 September 2026
 
 ### Observed entry path and bounded change
 

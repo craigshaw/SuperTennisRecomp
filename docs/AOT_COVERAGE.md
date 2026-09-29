@@ -85,7 +85,19 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 345 variants and five continuations
+## Accepted normal-build checkpoint: 345 variants and six continuations
+
+The second bank-00 scan selects instruction timing for `00D0DE:M1X0` and
+adds `00D0F1:M1X0` at proven local stack depth two. Its observed interpreted
+entry follows JML at `01C119`. Patch 0033 enables tested direct-page ORA at
+both M widths; the existing continuation mechanism needs no change.
+The long replay executes the new entry 1,352 times and removes 376,410
+interpreted instructions, a 3.41% overall reduction and 97.55% for this graph.
+Both saved inputs match their frame controls. The build retains 345 bodies
+and uses 40 instruction-timing roots. See
+[AOT_RECOVERY.md](AOT_RECOVERY.md) for validation and remaining limits.
+
+## Previous checkpoint: 345 variants and five continuations
 
 The bank-00 scan change selects instruction timing for `00CFE8:M1X0` and
 adds `00CFFB:M1X0` as a continuation at proven local stack depth two. Its
