@@ -44,6 +44,11 @@ def main():
         "01EBAE:1:0", "01ECCB:1:0", "01EF24:1:0",
         "01E5DF:1:0", "01E72F:1:0", "01EE3E:1:0",
     ))
+    # Separate scheduler entries into proven existing loop blocks. These do
+    # not add cfg functions or assert new exit widths.
+    env["SNESRECOMP_EMIT_CONTINUATIONS"] = ",".join((
+        "01E5DF:1:0>01E695:1:0", "01E72F:1:0>01E7E5:1:0",
+    ))
     # Preserve the validated bulk and recovery selections.
     # Global bus timing stays disabled.
     # See docs/AOT_BATCH_SCREENING.md before changing selection or cfg exclusions.

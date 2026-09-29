@@ -85,7 +85,19 @@ correction. Same-model controls must still match, and later state/video changes
 still need behavioural validation. Peripheral phase and generated block
 precharge remain relevant limits before normal generation or cfg promotion.
 
-## Accepted normal-build checkpoint: 345 variants
+## Accepted normal-build checkpoint: 345 variants and two continuations
+
+The 29 September continuation change recovers execution inside existing
+instruction-timed bodies. `01E695:M1X0` and `01E7E5:M1X0` are validated internal
+block entries, separate from cfg function roots and subroutine dispatch.
+The normal analysis manifest is unchanged. Both saved replays pass, and the
+long input removes 852,416 interpreted instructions, a 6.27% reduction.
+The two target loops retain less than 1% of their previous interpreted work.
+Three normal-build benchmark pairs suggest about 1.9% less local wall time.
+See [AOT_RECOVERY.md](AOT_RECOVERY.md) for the event trace, stack and temporary
+checks, actual continuation counts and remaining limits.
+
+## Previous checkpoint: 345 variants
 
 `01E5DF:M1X0`, `01E72F:M1X0` and `01EE3E:M1X0` pass both saved replays
 with selected word-operation and local X-save timing. Word memory shifts and

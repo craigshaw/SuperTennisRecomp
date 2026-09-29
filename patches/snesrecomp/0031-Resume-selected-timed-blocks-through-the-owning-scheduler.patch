@@ -1,0 +1,854 @@
+From 03c2c230b126ecff6595181cf09481c96450058d Mon Sep 17 00:00:00 2001
+From: Craig Shaw <craig@craigshaw.com>
+Date: Tue, 29 Sep 2026 17:19:19 +0100
+Subject: [PATCH] Resume selected timed blocks through the owning scheduler
+
+Keep exact internal continuation entries separate from architectural subroutine dispatch. Require balanced block entries and local IR values, then return through real guest frames and the scheduler unwind path. Add event, repeat-resume, width, return and cache checks.
+
+Co-authored-by: Codex <codex@openai.com>
+---
+ recompiler/v2/bus_timing.py        |  67 +++++++++--------
+ recompiler/v2/codegen.py           |   4 +
+ recompiler/v2/continuations.py     |  68 +++++++++++++++++
+ recompiler/v2/emit_function.py     |  36 +++++++--
+ recompiler/v2/program_emit.py      |  18 +++++
+ recompiler/v2/translation_units.py |  10 ++-
+ runner/src/cpu_state.h             |  11 +++
+ runner/src/snes/interp_bridge.c    |  72 ++++++++++++++++++
+ tests/run_c_tests.sh               |   1 +
+ tests/timing/README.md             |  24 ++++++
+ tests/timing/fixture.c             |  20 ++++-
+ tests/timing/run.py                |  24 +++++-
+ tests/timing/test_continuations.py | 115 +++++++++++++++++++++++++++++
+ tests/v2/test_program_emit.py      |  34 +++++++++
+ tests/v2/test_translation_units.py |  31 ++++++++
+ tools/v2_emit.py                   |   2 +
+ 16 files changed, 498 insertions(+), 39 deletions(-)
+ create mode 100644 recompiler/v2/continuations.py
+ create mode 100644 tests/timing/test_continuations.py
+
+diff --git a/recompiler/v2/bus_timing.py b/recompiler/v2/bus_timing.py
+index 3f802bc..b994996 100644
+--- a/recompiler/v2/bus_timing.py
++++ b/recompiler/v2/bus_timing.py
+@@ -8,10 +8,16 @@ import os
+ import re
+ from contextvars import ContextVar
+ from functools import wraps
++from v2 import continuations
+ 
+ 
+ BUS_TARGETS_ENV = "SNESRECOMP_EMIT_BUS_TIMING_TARGETS"
+ _selected_bus_timing = ContextVar("selected_bus_timing", default=False)
++_selected_continuation = ContextVar("selected_continuation", default=False)
++
++
++def continuation_enabled():
++    return _selected_continuation.get()
+ 
+ 
+ def enabled():
+@@ -48,9 +54,11 @@ def scope_function(emitter):
+     def scoped(rom, bank, start, entry_m, entry_x, **kwargs):
+         key = (((bank & 0xFF) << 16) | (start & 0xFFFF), entry_m, entry_x)
+         token = _selected_bus_timing.set(key in bus_targets())
++        resume_token = _selected_continuation.set(key in continuations.selections())
+         try:
+             return emitter(rom, bank, start, entry_m, entry_x, **kwargs)
+         finally:
++            _selected_continuation.reset(resume_token)
+             _selected_bus_timing.reset(token)
+     return scoped
+ 
+@@ -117,36 +125,35 @@ def validate_instruction_leaf(block_pairs, cfg):
+             returns += insn.mnem in ("RTS", "RTL") or direct_long_tail(insn, ops)
+     if not returns:
+         raise ValueError("instruction timing requires a reachable RTS, RTL or direct JML")
+-    if any(insn.mnem in ("PHA", "PLA", "PHX", "PLX")
+-           for pairs in block_pairs.values() for insn, _ in pairs):
+-        # Track bytes in local stack brackets, including X0 word saves.
+-        # Equal depth at joins rejects loops that accumulate or consume frames.
+-        depths = {cfg.entry: 0}
+-        pending = [cfg.entry]
+-        while pending:
+-            key = pending.pop()
+-            depth = depths[key]
+-            for insn, ops in block_pairs[key]:
+-                if insn.mnem == "PHA":
+-                    depth += 1
+-                elif insn.mnem == "PLA":
+-                    depth -= 1
+-                elif insn.mnem == "PHX":
+-                    depth += 2
+-                elif insn.mnem == "PLX":
+-                    depth -= 2
+-                if depth < 0:
+-                    raise ValueError("instruction timing cannot pull the caller's frame")
+-                if depth and (insn.mnem in ("RTS", "RTL", "JSR", "JSL")
+-                              or direct_long_tail(insn, ops)):
+-                    raise ValueError("instruction timing requires balanced stack at transfers")
+-            for successor in cfg.blocks[key].successors:
+-                if successor in depths:
+-                    if depths[successor] != depth:
+-                        raise ValueError("instruction timing requires equal stack depth at joins")
+-                else:
+-                    depths[successor] = depth
+-                    pending.append(successor)
++    # Track bytes in local stack brackets, including X0 word saves.
++    # Equal depth at joins rejects loops that accumulate or consume frames.
++    depths = {cfg.entry: 0}
++    pending = [cfg.entry]
++    while pending:
++        key = pending.pop()
++        depth = depths[key]
++        for insn, ops in block_pairs[key]:
++            if insn.mnem == "PHA":
++                depth += 1
++            elif insn.mnem == "PLA":
++                depth -= 1
++            elif insn.mnem == "PHX":
++                depth += 2
++            elif insn.mnem == "PLX":
++                depth -= 2
++            if depth < 0:
++                raise ValueError("instruction timing cannot pull the caller's frame")
++            if depth and (insn.mnem in ("RTS", "RTL", "JSR", "JSL")
++                          or direct_long_tail(insn, ops)):
++                raise ValueError("instruction timing requires balanced stack at transfers")
++        for successor in cfg.blocks[key].successors:
++            if successor in depths:
++                if depths[successor] != depth:
++                    raise ValueError("instruction timing requires equal stack depth at joins")
++            else:
++                depths[successor] = depth
++                pending.append(successor)
++    return depths
+ 
+ 
+ class BusTimingLines(list):
+diff --git a/recompiler/v2/codegen.py b/recompiler/v2/codegen.py
+index b76bd66..4940ce5 100644
+--- a/recompiler/v2/codegen.py
++++ b/recompiler/v2/codegen.py
+@@ -2413,6 +2413,10 @@ def _emit_return(op: Return, instruction_commit: Optional[str] = None) -> List[s
+            "    cpu->PB = _rpb;",
+            "    return interp_bridge_lle_yield_unwind(cpu, _rpc24);",
+            "  }"] if instruction_commit else []),
++        *(["  if (_aot_resume) {",
++           "    cpu->PB = _rpb;",
++           "    return interp_bridge_lle_yield_unwind(cpu, _rpc24);",
++           "  }"] if bus_timing.continuation_enabled() else []),
+         # task #7 RTS-decision trace (debug builds only). Records the exact
+         # host-return-vs-dispatch-vs-miss classification at this RTS/RTL,
+         # PC-range-filtered + tripwire-frozen in the recorder. Placed after
+diff --git a/recompiler/v2/continuations.py b/recompiler/v2/continuations.py
+new file mode 100644
+index 0000000..59f98eb
+--- /dev/null
++++ b/recompiler/v2/continuations.py
+@@ -0,0 +1,68 @@
++"""Opt-in scheduler continuations, separate from architectural function roots."""
++import os
++import re
++from dataclasses import fields, is_dataclass
++
++from v2.ir import Value
++
++ENV = "SNESRECOMP_EMIT_CONTINUATIONS"
++
++
++def selections():
++    """Map exact root keys to exact internal block keys (ROOT:M:X>PC:M:X)."""
++    result = {}
++    owners = {}
++    for item in filter(None, os.environ.get(ENV, "").split(",")):
++        if not re.fullmatch(r"[0-9a-fA-F]{6}:[01]:[01]>[0-9a-fA-F]{6}:[01]:[01]", item):
++            raise ValueError(f"{ENV}: invalid selection {item!r}")
++        root, point = ((int(p[0], 16), int(p[1]), int(p[2]))
++                       for p in (part.split(":") for part in item.split(">")))
++        if point in owners:
++            raise ValueError(f"{ENV}: duplicate continuation {item!r}")
++        if (root == point or root[0] >> 16 != point[0] >> 16
++                or root[0] >> 16 in (0x7E, 0x7F)
++                or min(root[0] & 0xFFFF, point[0] & 0xFFFF) < 0x8000):
++            raise ValueError(f"{ENV}: requires an internal ROM block in the root bank")
++        owners[point] = root
++        result.setdefault(root, set()).add(point)
++    return result
++
++
++def suffix(point):
++    pc, m, x = point
++    return f"_resume_{pc:06X}_M{m}X{x}"
++
++
++def _values(value):
++    if isinstance(value, Value):
++        yield value
++    elif isinstance(value, (list, tuple)):
++        for item in value:
++            yield from _values(item)
++    elif is_dataclass(value):
++        for field in fields(value):
++            yield from _values(getattr(value, field.name))
++
++
++def validate(points, block_pairs, depths, graph, entry_s_offset):
++    """Require balanced block entries and no host temporaries from a predecessor."""
++    if entry_s_offset or graph.const_z_folds:
++        raise ValueError("continuations require plain stack entries and no folded branches")
++    keys = {(k.pc, k.m, k.x): k for k in block_pairs}
++    for point in points:
++        if point not in keys or depths.get(keys[point]) != 0:
++            raise ValueError(f"continuation {point} is not a balanced exact block entry")
++    for pairs in block_pairs.values():
++        defined = set()
++        for insn, ops in pairs:
++            # External tail obligations need a separate continuation contract.
++            if insn.mnem == "JMP":
++                raise ValueError("continuations do not yet support JMP tails")
++            for op in ops:
++                for field in fields(op):
++                    value = getattr(op, field.name)
++                    if field.name != "out" and any(v not in defined for v in _values(value)):
++                        raise ValueError("continuations cannot use a predecessor's temporary")
++                out = getattr(op, "out", None)
++                if isinstance(out, Value):
++                    defined.add(out)
+diff --git a/recompiler/v2/emit_function.py b/recompiler/v2/emit_function.py
+index 3b23999..096d9e1 100644
+--- a/recompiler/v2/emit_function.py
++++ b/recompiler/v2/emit_function.py
+@@ -40,7 +40,7 @@ from v2.naming import (  # noqa: E402
+     variant_suffix as _variant_suffix,
+ )
+ from v2.event_precision import load_event_precision_sites  # noqa: E402
+-from v2 import bus_timing  # noqa: E402
++from v2 import bus_timing, continuations  # noqa: E402
+ from snes_cycles import (  # noqa: E402
+     block_static_cycles, instr_runtime_charges, region_speed,
+ )
+@@ -845,8 +845,13 @@ def emit_function(rom: bytes, bank: int, start: int,
+ 
+     instruction_timing = (
+         (bank << 16 | start, entry_m, entry_x) in bus_timing.instruction_targets())
++    resume_points = continuations.selections().get((bank << 16 | start, entry_m, entry_x), ())
++    if resume_points and (not instruction_timing or event_precision_function or has_lle_memory_poll):
++        raise ValueError("continuations require instruction timing without LLE guards")
+     if instruction_timing:
+-        bus_timing.validate_instruction_leaf(block_per_insn_ir, cfg)
++        depths = bus_timing.validate_instruction_leaf(block_per_insn_ir, cfg)
++        if resume_points:
++            continuations.validate(resume_points, block_per_insn_ir, depths, graph, entry_s_offset)
+ 
+     # ── Non-local-return idiom detection ────────────────────────────────
+     # A basic block is an NLR-block if its IR has the shape
+@@ -2097,7 +2102,17 @@ def emit_function(rom: bytes, bank: int, start: int,
+     src: List[str] = []
+     if instruction_timing or bus_timing.enabled():
+         src.append('#include "snes/aot_bus_timing.h"')
+-    src.append(f"RecompReturn {func_name}(CpuState *cpu) {{")
++    if resume_points:
++        src.append(f"/* AOT continuation group: {func_name} */")
++        src.append(f"static RecompReturn {func_name}_body(CpuState *cpu, uint32 _aot_resume);")
++        src.append(f"RecompReturn {func_name}(CpuState *cpu) {{ return {func_name}_body(cpu, 0); }}")
++        for point in sorted(resume_points):
++            pc, m, x = point
++            src.append(f"RecompReturn {func_name}{continuations.suffix(point)}(CpuState *cpu) {{")
++            src.append(f"  return {func_name}_body(cpu, 0x{pc:06X}u); }}")
++        src.append(f"static RecompReturn {func_name}_body(CpuState *cpu, uint32 _aot_resume) {{")
++    else:
++        src.append(f"RecompReturn {func_name}(CpuState *cpu) {{")
+     # Diagnostics — same call-stack plumbing v1 emitted, so the runtime
+     # debug_server's `call_stack` cmd and crash-handler attribution work.
+     src.append(f'  extern const char *g_last_recomp_func;')
+@@ -2125,7 +2140,9 @@ def emit_function(rom: bytes, bank: int, start: int,
+     src.append('  if (interp_bridge_lle_master_deadline_reached(cpu)) {')
+     src.append('    RecompStackPop();')
+     src.append(
+-        f'    return interp_bridge_lle_yield_unwind(cpu, 0x{fn_entry_pc:06X}u);'
++        f'    return interp_bridge_lle_yield_unwind(cpu, '
++        + (f'_aot_resume ? _aot_resume : 0x{fn_entry_pc:06X}u);' if resume_points
++           else f'0x{fn_entry_pc:06X}u);')
+     )
+     src.append('  }')
+     if has_lle_memory_poll:
+@@ -2172,7 +2189,8 @@ def emit_function(rom: bytes, bank: int, start: int,
+     # otherwise it dispatches on the popped PC. The caller sets
+     # cpu->host_return_valid right before each invoke (direct call -> 1;
+     # tail JMP/JML -> propagate the caller's _hrv; dispatch -> 0).
+-    src.append(f'  uint8 _hrv = cpu->host_return_valid;')
++    src.append('  uint8 _hrv = _aot_resume ? 0 : cpu->host_return_valid;' if resume_points
++               else '  uint8 _hrv = cpu->host_return_valid;')
+     src.append(f'  if (cpu_take_tailcall_return_context(&_entry_s, &_hrv)) {{')
+     src.append(f'    cpu->host_return_valid = _hrv;')
+     src.append(f'  }}')
+@@ -2213,6 +2231,12 @@ def emit_function(rom: bytes, bank: int, start: int,
+     # resolved to a SKIP_N non-local return (cpu_resolve_ancestor_skip).
+     # Index by the just-pushed g_recomp_stack_top; pop is implicit (top--).
+     src.append(f'  if (g_recomp_stack_top >= 1) g_cpu_entry_s[g_recomp_stack_top - 1] = _entry_s;')
++    if resume_points:
++        src.append('  switch ((_aot_resume << 2) | (cpu->m_flag << 1) | cpu->x_flag) {')
++        for pc, m, x in sorted(resume_points):
++            src.append(f'    case 0x{((pc << 2) | (m << 1) | x):08X}u: goto {_label_for(DecodeKey(pc, m, x))};')
++        src.append('    default: break;')
++        src.append('  }')
+     for i, key in enumerate(block_order):
+         src.append(f"  {_label_for(key)}:")
+         # Trace block entry — gives us the SNES PC chain in the trace ring.
+@@ -2277,6 +2301,8 @@ def emit_function(rom: bytes, bank: int, start: int,
+     src.append("  RecompStackPop();")
+     src.append("  return RECOMP_RETURN_NORMAL;")
+     src.append("}")
++    if resume_points:
++        src.append("/* End AOT continuation group */")
+     return "\n".join(src) + "\n"
+ 
+ 
+diff --git a/recompiler/v2/program_emit.py b/recompiler/v2/program_emit.py
+index 346ed70..f233846 100644
+--- a/recompiler/v2/program_emit.py
++++ b/recompiler/v2/program_emit.py
+@@ -532,6 +532,24 @@ def emit_dispatch_table(manifest: ProgramManifest, emitted_variants: Mapping,
+         "",
+     ])
+ 
++    from v2 import continuations
++    selected = continuations.selections()
++    if selected:
++        rows = []
++        for root, points in selected.items():
++            pc, m, x = root
++            if (m, x) not in emitted_variants.get(pc, ()):
++                raise ValueError(f"continuation owner {root} is not emitted")
++            name = f"{base_name(pc)}_M{m}X{x}"
++            for point in sorted(points):
++                wrapper = name + continuations.suffix(point)
++                lines.append(f"RecompReturn {wrapper}(CpuState *cpu);")
++                rows.append((point, pc, wrapper))
++        lines.append("const CpuContinuationEntry g_aot_continuations[] = {")
++        for (pc, m, x), owner, wrapper in sorted(rows):
++            lines.append(f"  {{0x{pc:06X}u, 0x{owner:06X}u, {m}, {x}, {wrapper}}},")
++        lines.extend(["};", f"const unsigned g_aot_continuation_count = {len(rows)};", ""])
++
+     # RAM-routine guards: for a WRAM-resident AOT body ($7E/$7F), runtime
+     # dispatch is allowed ONLY when the live WRAM bytes still hash-match the
+     # exact snapshot that was recompiled. Any mismatch -> the faithful
+diff --git a/recompiler/v2/translation_units.py b/recompiler/v2/translation_units.py
+index edec976..039cce2 100644
+--- a/recompiler/v2/translation_units.py
++++ b/recompiler/v2/translation_units.py
+@@ -12,6 +12,9 @@ from .atomic_output import write_if_changed
+ _TOP_LEVEL_CPU_FN_RE = re.compile(
+     r"^(?:RecompReturn|void)\s+([A-Za-z_]\w*)\s*"
+     r"\(CpuState\s*\*cpu\)\s*\{", re.MULTILINE)
++_CONTINUATION_GROUP_RE = re.compile(
++    r"^/\* AOT continuation group: ([A-Za-z_]\w*) \*/.*?"
++    r"^/\* End AOT continuation group \*/", re.MULTILINE | re.DOTALL)
+ _VARIANT_CALL_NAME_RE = re.compile(
+     r"\b([A-Za-z_]\w*_M[01]X[01])\s*\(\s*cpu\s*\)")
+ _VARIANT_SUFFIX_RE = re.compile(r"_M[01]X[01]$")
+@@ -63,7 +66,12 @@ def split_bank_translation_units(
+             monolithic_name: _with_referenced_variant_declarations(source)
+         }
+ 
+-    matches = list(_TOP_LEVEL_CPU_FN_RE.finditer(source))
++    # The public root, continuation wrappers and shared static body must
++    # stay in the owner's shard, including the static forward declaration.
++    groups = list(_CONTINUATION_GROUP_RE.finditer(source))
++    matches = groups + [match for match in _TOP_LEVEL_CPU_FN_RE.finditer(source)
++                       if not any(g.start() <= match.start() < g.end() for g in groups)]
++    matches.sort(key=lambda match: match.start())
+     if not matches:
+         return {monolithic_name: source}
+ 
+diff --git a/runner/src/cpu_state.h b/runner/src/cpu_state.h
+index bb5d9a0..7c09999 100644
+--- a/runner/src/cpu_state.h
++++ b/runner/src/cpu_state.h
+@@ -699,6 +699,17 @@ typedef enum InterpDeadlineEvent {
+   INTERP_DEADLINE_EVENT_IRQ = 3,
+ } InterpDeadlineEvent;
+ int interp_bridge_in_lle_scheduler(void);
++/* Internal block entries are separate from subroutine dispatch. They run
++ * only under the whole-program scheduler and always yield an architectural
++ * next PC, including after a real RTS/RTL pop. The table is immutable and
++ * sorted by (pc24, m, x); pass NULL/0 to disable it. */
++typedef struct CpuContinuationEntry {
++  uint32 pc24, owner_pc24;
++  uint8 m, x;
++  RecompReturn (*body)(CpuState *cpu);
++} CpuContinuationEntry;
++void interp_bridge_set_continuations(const CpuContinuationEntry *entries,
++                                    unsigned count);
+ int interp_bridge_lle_master_deadline_reached(const CpuState *cpu);
+ RecompReturn interp_bridge_lle_yield_unwind(CpuState *cpu, uint32 resume_pc24);
+ uint32 interp_bridge_lle_resume_pc(void);
+diff --git a/runner/src/snes/interp_bridge.c b/runner/src/snes/interp_bridge.c
+index 50231e8..d0f9985 100644
+--- a/runner/src/snes/interp_bridge.c
++++ b/runner/src/snes/interp_bridge.c
+@@ -692,6 +692,30 @@ int rtl_aot_node_denied(uint32 pc24) {
+ }
+ 
+ int interp_bridge_in_lle_scheduler(void) { return s_lle_sched_depth > 0; }
++static const CpuContinuationEntry *s_continuations;
++static unsigned s_continuation_count;
++
++void interp_bridge_set_continuations(const CpuContinuationEntry *entries,
++                                    unsigned count) {
++    s_continuations = entries;
++    s_continuation_count = entries ? count : 0;
++}
++
++static const CpuContinuationEntry *find_continuation(uint32 pc, int m, int x) {
++    if (!s_continuation_count || pc < s_continuations[0].pc24 ||
++        pc > s_continuations[s_continuation_count - 1].pc24) return NULL;
++    const uint32 key = (pc << 2) | (m << 1) | x;
++    unsigned lo = 0, hi = s_continuation_count;
++    while (lo < hi) {
++        unsigned mid = lo + (hi - lo) / 2;
++        const CpuContinuationEntry *entry = &s_continuations[mid];
++        uint32 candidate = (entry->pc24 << 2) | (entry->m << 1) | entry->x;
++        if (candidate < key) lo = mid + 1;
++        else if (candidate > key) hi = mid;
++        else return entry;
++    }
++    return NULL;
++}
+ uint32 interp_bridge_lle_resume_pc(void) { return s_lle_resume_pc24; }
+ 
+ int interp_bridge_lle_took_wai(void) {
+@@ -1421,6 +1445,54 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
+                 }
+             }
+         }
++        /* A validated block needs only live architectural state. It creates
++         * no guest frame and must return through the scheduler unwind ABI.
++         * Interrupt handlers and bounded call interpreters stay on their
++         * existing paths. No continuation survives as hidden host state. */
++        const CpuContinuationEntry *continuation =
++            auto_quiescent && !stop_on_rti && !in.e
++                ? find_continuation(pc_before, in.mf, in.xf) : NULL;
++        if (continuation && lle_yield_bounce_enabled() &&
++            !lle_bounce_target_excluded(continuation->owner_pc24) &&
++            !rtl_aot_node_denied(continuation->owner_pc24)) {
++            sync_interp_to_cpu(&in, cpu);
++            if (s_apu_pending_master >= bridge_bounce_flush_thresh())
++                bridge_apu_flush(cpu);
++            const int saved_apu = g_interp_apu_driving;
++            const int saved_base = s_interp_bounce_recomp_base;
++            const int saved_owner = s_interp_bounce_owner_depth;
++            g_interp_apu_driving = 0;
++            s_interp_bounce_recomp_base = g_recomp_stack_top;
++            s_interp_bounce_owner_depth = s_interp_bridge_depth;
++            s_lle_next_unwind_is_deadline = 0;
++            cpu->host_return_valid = 0;
++            RecompReturn result = continuation->body(cpu);
++            g_interp_apu_driving = saved_apu;
++            s_interp_bounce_recomp_base = saved_base;
++            s_interp_bounce_owner_depth = saved_owner;
++            sync_cpu_to_interp(cpu, &in);
++            if (result == RECOMP_RETURN_NORMAL || !s_lle_unwind_active ||
++                s_lle_unwind_owner_depth != s_interp_bridge_depth) {
++                fprintf(stderr, "[interp] invalid continuation result at $%06X\n",
++                        (unsigned)pc_before);
++                bridge_apu_flush(cpu);
++                return 0;
++            }
++            in.k = (uint8)(s_lle_unwind_pc24 >> 16);
++            in.pc = (uint16)s_lle_unwind_pc24;
++            const int deadline = s_lle_unwind_is_deadline;
++            s_lle_unwind_active = 0;
++            s_lle_unwind_owner_depth = 0;
++            s_lle_unwind_is_deadline = 0;
++            if (deadline) {
++                s_lle_resume_pc24 = ((uint32)in.k << 16) | in.pc;
++                sync_interp_to_cpu(&in, cpu);
++                bridge_apu_flush(cpu);
++                return 1;
++            }
++            memset(qring, 0, sizeof qring);
++            continue;
++        }
+         const uint8_t  op = bridge_bus_read(cpu, pc_before);
+         /* A COP reached by interpreted game code vectors to the ROM's invalid-
+          * interrupt crash loop.  When the opt-in instruction trace is active,
+diff --git a/tests/run_c_tests.sh b/tests/run_c_tests.sh
+index ceaee3e..6d86669 100644
+--- a/tests/run_c_tests.sh
++++ b/tests/run_c_tests.sh
+@@ -100,6 +100,7 @@ python3 "$ROOT/tests/timing/test_index_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_stack_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_subtract_rmw_instruction_timing.py"
+ python3 "$ROOT/tests/timing/test_word_instruction_timing.py"
++python3 "$ROOT/tests/timing/test_continuations.py"
+ 
+ echo "=== DSP-1 bus/core shell ==="
+ "$CC" -std=c11 -Wall -Wextra -Werror -O1 \
+diff --git a/tests/timing/README.md b/tests/timing/README.md
+index b2aec6f..473da60 100644
+--- a/tests/timing/README.md
++++ b/tests/timing/README.md
+@@ -278,3 +278,27 @@ register handler suppresses its legacy synthetic beam tick inside this scope;
+ the shared instruction completion advances time. The HDMA/MMIO test verifies
+ HBlank and auto-joypad phase, byte and mirrored word reads, scope restoration,
+ and preservation of the legacy and interpreter read paths.
++
++## Selected scheduler continuations
++
++`SNESRECOMP_EMIT_CONTINUATIONS` accepts comma-separated
++`ROOT:M:X>BLOCK:M:X` selections. The root must already be emitted with
++instruction timing. Each block must be an exact internal CFG entry with
++zero local stack depth. The validator rejects predecessor temporaries,
++folded branches, external JMP tails, adjusted entry stacks and LLE guards.
++These entries do not add subroutine roots or exit declarations to analysis.
++
++The emitter writes a separate `g_aot_continuations` table and count. A host
++opts in with `interp_bridge_set_continuations`. Only the native whole-program
++scheduler uses the table. Runtime width lookup is exact; bounce exclusions
++and AOT denial still apply. A continuation pushes no guest return frame.
++RTS/RTL pops the real frame and yields its actual destination to the owning
++interpreter. Event yields use the same path. No host continuation state is
++retained across an interrupt.
++
++`test_continuations.py` compares real generated execution against the
++interpreter at deadlines and after single and repeated resumes. It covers
++local stack saves, width variants, compiled and interpreted callees, rewritten
++return frames, SlowROM/FastROM, NMI, IRQ and refresh. Unsupported entries fail
++closed. General arbitrary-PC resumption, emulation mode, tail obligations and
++nonzero local stack entries remain outside this contract.
+diff --git a/tests/timing/fixture.c b/tests/timing/fixture.c
+index 1365a83..0473f35 100644
+--- a/tests/timing/fixture.c
++++ b/tests/timing/fixture.c
+@@ -152,12 +152,18 @@ int main(int argc, char **argv) {
+     int ok;
+     if (argc >= 4) {
+         event_entry = test->pc;
+-        if (!strcmp(argv[2], "event-aot")) event_body = test->body;
++        if (!strcmp(argv[2], "event-aot")) {
++            event_body = test->body;
++            interp_bridge_set_continuations(test->continuations, test->continuation_count);
++        }
+         else if (strcmp(argv[2], "event-interp")) return 2;
+         g_c.S = 0x01FF;
+         const uint8 scheduler[] = {0x22, test->pc, test->pc >> 8, test->pc >> 16,
+                                    0xA9, 0x5A, 0xCB};
+-        load(0x7000, scheduler, sizeof scheduler);
++        const uint8 short_scheduler[] = {0x20, test->pc, test->pc >> 8,
++                                         0xA9, 0x5A, 0xCB};
++        if (test->short_call) load(0x7000, short_scheduler, sizeof short_scheduler);
++        else load(0x7000, scheduler, sizeof scheduler);
+         if (!strcmp(argv[3], "nmi")) {
+             g_test_snes.inNmi = true;
+             g_test_snes.inVblank = true;
+@@ -172,6 +178,15 @@ int main(int argc, char **argv) {
+             interp_bridge_set_master_deadline(strtoull(argv[3], NULL, 10));
+         }
+         ok = interp_bridge_run_until_quiescent(&g_c, 0x007000) == 1;
++        if (argc == 5 && !strcmp(argv[4], "repeat")) {
++            for (unsigned i = 0; i < 40 && !interp_bridge_lle_took_wai(); ++i) {
++                const uint32 resume = interp_bridge_lle_resume_pc();
++                interp_bridge_set_master_deadline(g_c.master_cycles + 70);
++                g_test_snes.nmiPending = false;
++                g_test_snes.inIrq = false;
++                ok = ok && interp_bridge_run_until_quiescent(&g_c, resume) == 1;
++            }
++        }
+         if (argc == 5 && !strcmp(argv[4], "resume")) {
+             const uint32 resume = interp_bridge_lle_resume_pc();
+             interp_bridge_set_master_deadline(1000);
+@@ -204,6 +219,7 @@ int main(int argc, char **argv) {
+            event_entry ? g_snes->apuCatchupCycles : 0.0);
+     if (test->instruction_timing) printf(",\"irq\":%d", g_test_snes.inIrq);
+     if (test->instruction_timing && event_entry) printf(",\"pb\":%u", g_c.PB);
++    if (test->continuation_count) printf(",\"continuation_entries\":%u", timing_resume_entries);
+     printf(",\"writes\":[");
+     for (unsigned i = 0; i < write_count; ++i)
+         printf("%s{\"address\":%u,\"value\":%u,\"master\":%llu}",
+diff --git a/tests/timing/run.py b/tests/timing/run.py
+index e77afa1..25e5f89 100644
+--- a/tests/timing/run.py
++++ b/tests/timing/run.py
+@@ -90,6 +90,11 @@ def build(out: Path, cc: str, cases=None) -> Path:
+         if case.get("instruction_timing"):
+             os.environ["SNESRECOMP_EMIT_INSTRUCTION_TIMING"] = (
+                 f"{pc:06X}:{case.get('m', 1)}:{case.get('xf', 0)}")
++        saved_continuations = os.environ.get("SNESRECOMP_EMIT_CONTINUATIONS")
++        if case.get("continuations"):
++            os.environ["SNESRECOMP_EMIT_CONTINUATIONS"] = ",".join(
++                f"{pc:06X}:{case.get('m', 1)}:{case.get('xf', 0)}>{point:06X}:{m}:{x}"
++                for point, m, x in case['continuations'])
+         try:
+             codegen.set_name_resolver({target: f"bank_{target >> 16:02X}_{target & 0xFFFF:04X}"
+                                       for target in (*case.get("callees", []),
+@@ -102,6 +107,10 @@ def build(out: Path, cc: str, cases=None) -> Path:
+                                         entry_m=case.get("m", 1), entry_x=case.get("xf", 0),
+                                         func_name=f"timing_case_{i}"))
+         finally:
++            if saved_continuations is None:
++                os.environ.pop("SNESRECOMP_EMIT_CONTINUATIONS", None)
++            else:
++                os.environ["SNESRECOMP_EMIT_CONTINUATIONS"] = saved_continuations
+             codegen.set_name_resolver({})
+             codegen.set_valid_variants({})
+             if saved_instruction_timing is None:
+@@ -114,11 +123,20 @@ def build(out: Path, cc: str, cases=None) -> Path:
+         bodies.append(f"static const TimingInit init_{i}[] = {{" +
+                       (",".join(f"{{{addr},{value}}}" for addr, value in memory.items())
+                        or "{0,0}") + "};")
++        from v2.continuations import suffix
++        for point, m, x in case.get('continuations', []):
++            target = name + suffix((point, m, x))
++            bodies.append(f"static RecompReturn counted_{target}(CpuState *cpu) {{ "
++                          f"timing_resume_entries++; return {target}(cpu); }}")
++        bodies.append(f"static const CpuContinuationEntry resumes_{i}[] = {{" +
++                      (",".join(f"{{{point},{pc},{m},{x},counted_{name}{suffix((point,m,x))}}}"
++                                for point,m,x in case.get('continuations', [])) or "{0}") + "};")
+         table.append(f"{{code_{i}, sizeof(code_{i}), {pc}, "
+                      f"{case.get('m', 1)}, {case.get('xf', 0)}, {case.get('db', 0)}, "
+                      f"{case.get('x', 0)}, {case.get('y', 0)}, {case.get('d', 0)}, "
+                      f"{case.get('memsel', 0)}, init_{i}, {len(memory)}, {name}, "
+-                     f"{int(bool(case.get('instruction_timing')))}, {case.get('status', 4)}" + "}")
++                     f"{int(bool(case.get('instruction_timing')))}, {case.get('status', 4)}, "
++                     f"resumes_{i}, {len(case.get('continuations', []))}, {int(bool(case.get('short_call')))}" + "}")
+     header = """typedef struct TimingInit { uint32 address; uint8 value; } TimingInit;
+ typedef struct TimingCase {
+     const uint8_t *code; int size; uint32 pc;
+@@ -127,7 +145,11 @@ typedef struct TimingCase {
+     RecompReturn (*body)(CpuState *);
+     int instruction_timing;
+     uint8 status;
++    const CpuContinuationEntry *continuations;
++    unsigned continuation_count;
++    int short_call;
+ } TimingCase;
++static unsigned timing_resume_entries;
+ """
+     (out / "timing_cases.inc").write_text(
+         header + "\n".join(bodies) + "\nstatic const TimingCase cases[] = {\n" +
+diff --git a/tests/timing/test_continuations.py b/tests/timing/test_continuations.py
+new file mode 100644
+index 0000000..aed01ad
+--- /dev/null
++++ b/tests/timing/test_continuations.py
+@@ -0,0 +1,115 @@
++"""Scheduler-only block continuations preserve architectural event boundaries."""
++import json
++import os
++from pathlib import Path
++import subprocess
++import tempfile
++import unittest
++from unittest.mock import patch
++
++import run as timing
++from v2 import continuations
++
++
++def cases():
++    # The loop header is internal. Its PHX/PLX pair also tests interruption
++    # inside a local save: interpretation must reach a balanced entry first.
++    base = [0xA2, 3, 0, 0xDA, 0xA9, 0x5A, 0x8D, 0, 0x10,
++            0xFA, 0xCA, 0xD0, 0xF6, 0x6B]
++    result = []
++    for fast in (0, 1):
++        pc = 0x808000 if fast else 0x8000
++        result.append(dict(name=f'local-stack-{fast}', pc=pc, memsel=fast,
++                           code=base, continuations=[(pc+3, 1, 0)]))
++        # Both M widths are used within a resumed block, including a word RMW.
++        code = [0xA2, 3, 0, 0xC2, 0x20, 0x26, 0x40, 0xE2, 0x20,
++                0xCA, 0xD0, 0xF7, 0x6B]
++        result.append(dict(name=f'width-{fast}', pc=pc, memsel=fast,
++                           code=code, continuations=[(pc+3, 1, 0)],
++                           memory={0x40:0x7F,0x41:0x80}))
++    result.append(dict(name='short-return', short_call=True,
++                       code=base[:-1]+[0x60], continuations=[(0x8003,1,0)]))
++    # Repeated calls use real guest frames. Test compiled and missing callees.
++    for compiled in (False, True):
++        result.append(dict(name=f'call-{compiled}',
++                           code=[0xA2,3,0,0x22,0,0x81,0,0xCA,0xD0,0xF9,0x6B],
++                           continuations=[(0x8003,1,0)],
++                           memory={0x8100:0xEA,0x8101:0x6B},
++                           **{'callees' if compiled else 'interpreted_callees':[0x8100]}))
++    # The caller's return frame changes. A resumed return must use the actual
++    # popped PC, not reconstruct a paired host return from the old root.
++    result.append(dict(name='rewritten-return',
++                       code=[0xA2,3,0,0xA9,5,0x8D,0xFD,1,
++                             0xCA,0xD0,0xF8,0x6B],
++                       continuations=[(0x8003,1,0)]))
++    # A single address has two valid width variants. Lookup and the body
++    # selector must use the exact key, including when it differs from root M.
++    for value in (0, 1):
++        result.append(dict(name=f'exact-width-{value}', x=3,
++                           code=[0xAD,0,0x10,0xF0,4,0xE2,0x20,0x80,2,
++                                 0xC2,0x20,0xEA,0xCA,0xD0,0xFC,0x6B],
++                           memory={0x1000:value},
++                           continuations=[(0x800B,0,0),(0x800B,1,0)]))
++    for case in result:
++        case['instruction_timing'] = True
++        case['status'] = 0
++    return result
++
++
++class Continuations(unittest.TestCase):
++    def test_fail_closed(self):
++        for selection in ('bad', '008000:1:0>008000:1:0',
++                          '008000:1:0>018003:1:0',
++                          '008000:1:0>008003:1:0,008010:1:0>008003:1:0'):
++            with self.subTest(selection=selection), patch.dict(os.environ, {continuations.ENV:selection}):
++                with self.assertRaises(ValueError): continuations.selections()
++        # Mid-instruction, wrong width, nonzero local stack, absent timing,
++        # and a JMP tail must not become continuation entries.
++        for code, point, timed in [
++                ([0xA2,3,0,0xCA,0xD0,0xFD,0x6B], '008004:1:0', True),
++                ([0xA2,3,0,0xCA,0xD0,0xFD,0x6B], '008003:0:0', True),
++                ([0x48,0xD0,0,0x68,0x6B], '008003:1:0', True),
++                ([0xA2,3,0,0xCA,0xD0,0xFD,0x6B], '008003:1:0', False),
++                ([0xA2,3,0,0xCA,0xD0,0xFD,0x5C,0,0x81,0], '008003:1:0', True)]:
++            with patch.dict(os.environ, {continuations.ENV:f'008000:1:0>{point}',
++                     'SNESRECOMP_EMIT_INSTRUCTION_TIMING':'008000:1:0' if timed else ''}):
++                with self.subTest(code=code,point=point), self.assertRaises(ValueError):
++                    timing.emit_function(bytes(code)+bytes(32768-len(code)),
++                                         bank=0,start=0x8000,entry_m=1,entry_x=0)
++
++    def test_event_parity(self):
++        with tempfile.TemporaryDirectory(prefix='snes-resume-') as temp, patch.dict(
++                os.environ, {k:v for k,v in os.environ.items()
++                             if not k.startswith('SNESRECOMP_')}, clear=True):
++            tests=cases(); binary=timing.build(Path(temp),os.environ.get('CC','cc'),tests)
++            checks=0; total_entries=0
++            for i, case in enumerate(tests):
++                for event in ('63','84','100','120','150','180','220',
++                              'refresh','beam-nmi','irq:120'):
++                    for resume in ((), ('resume',), ('repeat',)):
++                        results=[]
++                        for tier in ('event-interp','event-aot'):
++                            p=subprocess.run([str(binary),str(i),tier,event,*resume],
++                                             capture_output=True,text=True,timeout=10)
++                            self.assertEqual(p.returncode,0,p.stdout+p.stderr)
++                            result=json.loads(p.stdout)
++                            total_entries += result.pop('continuation_entries')
++                            results.append(result)
++                        with self.subTest(case=case['name'],event=event,resume=resume):
++                            self.assertEqual(*results)
++                        checks+=1
++            # Disabling LLE bounce must disable internal continuations too.
++            env=dict(os.environ, SNESRECOMP_LLE_BOUNCE='0')
++            disabled=[]
++            for tier in ('event-interp','event-aot'):
++                p=subprocess.run([str(binary),'0',tier,'120','repeat'],env=env,
++                                 capture_output=True,text=True,timeout=10)
++                self.assertEqual(p.returncode,0,p.stdout+p.stderr)
++                disabled.append(json.loads(p.stdout))
++            self.assertEqual(*disabled)
++            self.assertEqual(disabled[1]['continuation_entries'],0)
++            self.assertGreater(total_entries, 0)
++            print(f'Continuations: {checks} event comparisons, {total_entries} native entries')
++
++
++if __name__ == '__main__': unittest.main()
+diff --git a/tests/v2/test_program_emit.py b/tests/v2/test_program_emit.py
+index 92c9c30..16308b1 100644
+--- a/tests/v2/test_program_emit.py
++++ b/tests/v2/test_program_emit.py
+@@ -490,3 +490,37 @@ def test_cross_bank_name_collision_falls_back_to_synthetic_name(tmp_path):
+         f"duplicate symbol definition(s): {counts}"
+     assert counts["Foo_M1X1"] == 1
+     assert counts["bank_00_8100_M1X1"] == 1
++
++
++def test_continuation_selection_cache_and_dispatch_separation(tmp_path, monkeypatch):
++    rom, cfg, out = _fixture(tmp_path, target_opcode=0xEA)
++    data = bytearray(rom.read_bytes())
++    data[0x10:0x16] = bytes([0xA2, 3, 0xCA, 0xD0, 0xFD, 0x60])
++    rom.write_bytes(data)
++    monkeypatch.setenv('SNESRECOMP_EMIT_INSTRUCTION_TIMING', '008010:1:1')
++    monkeypatch.delenv('SNESRECOMP_EMIT_CONTINUATIONS', raising=False)
++    first = _run(rom, cfg, out)
++    assert first.returncode == 0, first.stdout + first.stderr
++    normal = (out / 'bank00_v2.c').read_bytes()
++    manifest = (out / 'program_manifest.json').read_bytes()
++    monkeypatch.setenv('SNESRECOMP_EMIT_CONTINUATIONS', '008010:1:1>008012:1:1')
++    selected = _run(rom, cfg, out)
++    assert selected.returncode == 0, selected.stdout + selected.stderr
++    assert 'reused verified published output' not in selected.stdout
++    assert (out / 'program_manifest.json').read_bytes() == manifest
++    dispatch = (out / 'dispatch_v2.c').read_text()
++    architectural = dispatch.split('const DispatchEntry g_dispatch_table[]')[1].split('};')[0]
++    assert '0x008012u' not in architectural
++    assert '{0x008012u, 0x008010u, 1, 1,' in dispatch
++    assert b'_resume_008012_M1X1' in (out / 'bank00_v2.c').read_bytes()
++    repeated = _run(rom, cfg, out)
++    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
++    assert 'reused verified published output' in repeated.stdout
++    monkeypatch.setenv('SNESRECOMP_EMIT_CONTINUATIONS', '008010:1:1>008013:1:1')
++    rejected = _run(rom, cfg, out)
++    assert rejected.returncode != 0
++    assert (out / 'program_manifest.json').read_bytes() == manifest
++    monkeypatch.delenv('SNESRECOMP_EMIT_CONTINUATIONS')
++    restored = _run(rom, cfg, out)
++    assert restored.returncode == 0, restored.stdout + restored.stderr
++    assert (out / 'bank00_v2.c').read_bytes() == normal
+diff --git a/tests/v2/test_translation_units.py b/tests/v2/test_translation_units.py
+index 25c870c..b5356c0 100644
+--- a/tests/v2/test_translation_units.py
++++ b/tests/v2/test_translation_units.py
+@@ -117,3 +117,34 @@ def test_writer_removes_stale_bank_shape():
+         assert names == ("bank00_v2.c",)
+         assert changed == 3
+         assert not list(out_dir.glob("bank00_part*_v2.c"))
++
++
++def test_continuation_group_stays_with_its_owner_and_compiles():
++    import os
++    import subprocess
++    from unittest.mock import patch
++    from v2.emit_bank import BankEntry, emit_bank
++    rom = bytearray(0x8000)
++    rom[0] = 0x6B
++    rom[0x800:0x807] = bytes([0xA2, 3, 0, 0xCA, 0xD0, 0xFD, 0x6B])
++    with patch.dict(os.environ, {
++            'SNESRECOMP_EMIT_INSTRUCTION_TIMING':'008800:1:0',
++            'SNESRECOMP_EMIT_CONTINUATIONS':'008800:1:0>008803:1:0'}):
++        source = emit_bank(bytes(rom), 0, [BankEntry(None, 0x8000, entry_m=1, entry_x=0),
++                                         BankEntry(None, 0x8800, entry_m=1, entry_x=0)])
++    parts = split_bank_translation_units(source, 0, {}, threshold_bytes=0, pc_span=0x800)
++    assert set(parts) == {'bank00_part00_v2.c','bank00_part01_v2.c'}
++    owner = parts['bank00_part01_v2.c']
++    assert 'static RecompReturn bank_00_8800_M1X0_body' in owner
++    assert 'bank_00_8800_M1X0_resume_008803_M1X0' in owner
++    assert 'bank_00_8800_M1X0_body' not in parts['bank00_part00_v2.c']
++    runtime = pathlib.Path(__file__).resolve().parents[2] / 'runner/src'
++    with tempfile.TemporaryDirectory() as directory:
++        (pathlib.Path(directory) / "funcs.h").write_text("void WatchdogCheck(void);\n")
++        for name, content in parts.items():
++            path = pathlib.Path(directory) / name
++            path.write_text(content)
++            result = subprocess.run([os.environ.get('CC','cc'), '-std=c11',
++                                     '-I',str(runtime),'-c',str(path),'-o',str(path)+'.o'],
++                                    capture_output=True,text=True)
++            assert result.returncode == 0, result.stderr
+diff --git a/tools/v2_emit.py b/tools/v2_emit.py
+index 3ae117c..535d1a4 100644
+--- a/tools/v2_emit.py
++++ b/tools/v2_emit.py
+@@ -264,12 +264,14 @@ def main() -> int:
+         from v2.bus_timing import bus_targets
+         selected_bus_timing = sorted(bus_targets())
+         instruction_timing = os.environ.get("SNESRECOMP_EMIT_INSTRUCTION_TIMING", "")
++        continuations = os.environ.get("SNESRECOMP_EMIT_CONTINUATIONS", "")
+         return hashlib.sha256(
+             (f"{tree_digest}\0aot_deny_gate={int(deny_gate)}"
+              f"\0event_crossing_audit={int(event_audit)}"
+              f"\0bus_timing={int(bus_timing)}"
+              f"\0selected_bus_timing={selected_bus_timing}"
+              f"\0instruction_timing={instruction_timing}"
++             f"\0continuations={continuations}"
+              f"\0event_precision={event_precision}").encode()
+         ).hexdigest()
+ 
+-- 
+2.54.0 (Apple Git-157)
+

@@ -1,12 +1,117 @@
 # AOT recovery
 
-The accepted normal build generates **345 AOT bodies**. The previous
-342-body checkpoint is title `b4b2bae` with snesrecomp `1314cd4`. This batch
-adds `01E5DF`, `01E72F` and their shared helper `01EE3E`, all M1X0, with no
-removals. The new shared pin is `f4451a3`, described in `SNESRECOMP_PATCHES.md`.
-This report supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
+The accepted normal build generates **345 AOT bodies**, with two validated
+scheduler continuation entries. The previous checkpoint is title `b28a41e`
+with snesrecomp `f4451a3`. The new shared pin is `03c2c23`, described in
+`SNESRECOMP_PATCHES.md`. This report supersedes the older handoff in
+`AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: word operations and X saves, 28 September 2026
+## Latest checkpoint: resume compiled loops after events, 29 September 2026
+
+### Observed cause and bounded change
+
+The first direct compiled invocation of `01E5DF:M1X0` starts at frame 933,
+S=`0FF9`. It yields at `01E69F:M1X0`, with the same S, at master clock
+333372520 against IRQ deadline 333372512. The unwind is marked as a deadline
+transfer. The next frame includes the NMI handler, followed by interpreted
+`01E6DB:M0X0` and `01E6EA:M1X0` at S=`0FF9`. Thus the scheduler handoff is an
+observed cause of lost compiled loop work. The bounded trace stops after
+5,000 interpreted steps; it does not claim to follow the entire invocation.
+The 1,000-frame diagnostic comparison matches the accepted control.
+
+Patch 0031 adds an opt-in shared continuation table, separate from normal
+subroutine dispatch. The title selects only `01E695:M1X0` within `01E5DF:M1X0`
+and `01E7E5:M1X0` within `01E72F:M1X0`. Both are existing CFG block entries
+with zero local stack depth. The generator checks exact widths, stack depth
+and absence of predecessor IR temporaries. It rejects folded branches,
+external JMP tails, adjusted entry stacks and LLE guards. Continuation wrappers
+and their shared body stay together when a large bank is split.
+
+Only the native whole-program scheduler uses these entries. A continuation
+pushes no guest return frame. It uses live CPU state, executes the real
+RTS/RTL pop, and yields the actual destination back to its interpreter owner.
+Deadline yields use the same ownership path. No hidden host continuation is
+kept across interrupts. Disabled bouncing and owner exclusions still apply.
+Arbitrary instruction PCs, emulation mode and nonzero local stack entries
+remain outside the contract.
+
+This is a generation-policy change, with no cfg edit, added function root or
+exit-width declaration. The normal Python analyzer manifest remains byte
+identical to the 345-body baseline and passes the lab manifest reader. There
+is no new Mesen exit claim, so no repeat Mesen capture is needed. The old
+exact `02A3E2` evidence and all unrelated controls remain valid.
+
+### Measured result
+
+The primary 2,125-frame and long 4,816-frame replays match the saved frame
+references with zero bailouts, tuple overflow or journal failures. The final
+normal-library long run records 142 and 139 continuation invocations that
+commit guest CPU work at the two selected entries.
+
+Long-replay interpreted instructions fall from 13,591,991 to **12,739,575**.
+That removes **852,416 instructions, or 6.27%**, and 3,186,214 interpreted CPU
+cycles. The remaining interpreted work inside the two target graphs is only
+3,926 and 3,834 instructions, down from 433,455 and 426,721. This recovers
+**99.1% of their previously interpreted work**. It does not add bodies: the
+accepted count remains **345**, with 38 instruction-timing entries and two
+separate continuation entries.
+
+Three alternating rendered pairs of normal builds, after one warm-up per
+build, average 3.55492 seconds for the baseline and 3.48686 seconds for the
+candidate. All three improve, about **1.9% less local wall time**, and all
+final images match. This remains a short local measurement, not a sustained
+match frame-rate claim. An earlier private-binary benchmark was mixed and is
+not used: review found different generated-code trace build flags between its
+control and candidate. Its raw results remain saved.
+
+### Validation, evidence and next step
+
+The final Python v2 suite passes 403/403, including a real split-bank compile
+check. The shared C suite passes once for the runtime change. The final
+focused continuation suite passes 300 event comparisons, with 327 counted
+native entries, plus disabled-bounce parity and nine fail-closed checks.
+It covers repeated deadlines, local saves, both M widths at one address,
+compiled and interpreted callees, rewritten return frames, RTS/RTL,
+SlowROM/FastROM, IRQ, NMI and refresh. The separate generation-cache test
+passes and confirms that invalid selections do not replace accepted output.
+After the shared C run, only test coverage and the split-bank grouping changed;
+no runtime timing logic changed. The focused checks cover those final edits.
+
+Fresh normal cfg-only generation reproduces all seven clean candidate C files
+and the full manifest. Desktop and headless builds, the normal-library long
+comparison, the 180-frame neutral check and all seven workflow checks pass.
+The final split-bank grouping adds only comments to this unsharded title
+output. Both desktop and headless binary hashes are identical before and
+after that change, so the accepted gameplay and benchmark checks are reused.
+All 31 patch checks and the final publication and whitespace checks pass.
+
+Private evidence is under `captures/aot-resume-20260929`, indexed by
+`captures/aot-resume-current.txt` and follow-up records reachable through
+`captures/aot-recovery-current.txt`. It retains the initial bridge-only probe
+that did not catch a direct compiled entry, the corrected trace, prototype,
+clean candidates, synthetic failures and passes, cost profiles, lab manifest
+review, benchmarks and normal-generation comparisons. A malformed synthetic
+branch and test harness setup failures are preserved as diagnostics, not
+runtime failures. No bulk screen, native analyzer rebuild, manual gameplay,
+Windows build or five-replay sweep was repeated. Unrelated UI and lab changes
+remain untouched.
+
+The next bounded selection experiment can reuse this mechanism for the
+already instruction-timed `01EBAE` and `01ECCB` loops. Their saved current
+interpreted work is 170,273 and 246,143 instructions. Confirm the handoff and
+choose balanced existing block entries, then measure actual continuation
+execution. This needs selection and representative replay checks, not another
+full shared suite unless shared source changes. Do not invent cfg roots or
+exit contracts, and do not assume an entry is safe from its address alone.
+
+The larger remaining group is the six overlapping bank-00 graphs identified
+by the saved cost profile: `00CE3F`, `00CFE8`, `00D0DE`, `00D271`, `00D285` and
+`00D2A0`. They already have bodies but use aggregate timing. Their saved union
+was 3,183,161 interpreted instructions. Inspect the existing operation and
+call blockers before choosing a bounded instruction-timing conversion.
+Do not rerun the bulk classification or reopen the parked `00804D` prefix.
+
+## Previous checkpoint: word operations and X saves, 28 September 2026
 
 ### Bounded change and evidence
 

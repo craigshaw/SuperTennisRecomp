@@ -5,9 +5,9 @@ This is the source of truth for the snesrecomp patches required by Super Tennis.
 ## Public pin and recovery patches
 
 The submodule is pinned to integration commit
-[`f4451a301072f64fd32a363abb8996037a034a41`](https://github.com/craigshaw/snesrecomp/commit/f4451a301072f64fd32a363abb8996037a034a41)
+[`03c2c230b126ecff6595181cf09481c96450058d`](https://github.com/craigshaw/snesrecomp/commit/03c2c230b126ecff6595181cf09481c96450058d)
 on `craigshaw/snesrecomp`, branch `codex/super-tennis-runtime`.
-It contains patches 0001 through 0030. All are published and retained under
+It contains patches 0001 through 0031. All are published and retained under
 `patches/snesrecomp/` for recovery. Patches 0023 through 0026 add exact-entry exit-width
 declarations, interpreted selection and direct call/tail instruction timing. Patch 0024 also corrects the resume bank after a deadline
 unwind through compiled JSL calls. Patch 0025 separates exit analysis from
@@ -32,6 +32,13 @@ exactly. The Python v2 and shared C suites passed before publication,
 cfg-only output matched the accepted generated code, and the 4500-frame
 title replay passed. Repinning changes dependency history and setup metadata;
 it introduces no further runtime source changes.
+
+Patch 0031 adds opt-in scheduler continuations for existing instruction-timed
+blocks. It keeps continuation lookup separate from subroutine dispatch and
+analysis roots. The title selects two balanced loop headers in `01E5DF` and
+`01E72F`; its normal analyzer manifest is unchanged. The Python v2 suite,
+shared C suite, focused continuation/cache tests and both title replays pass.
+See [AOT_RECOVERY.md](AOT_RECOVERY.md) for measured work and remaining limits.
 
 ## Ordered series
 
@@ -67,6 +74,7 @@ it introduces no further runtime source changes.
 | `0028-Time-byte-stacks-and-instruction-timed-HVBJOY.patch` | Add balanced M1 PHA/PLA and DEX timing; scope reads so HVBJOY does not add a second beam advance. |
 | `0029-Time-selected-subtract-and-byte-memory-operations.patch` | Enable SEC, selected SBC forms and byte direct-page INC/DEC/ASL/ROL with interpreter and event/resume comparisons. |
 | `0030-Time-selected-word-shifts-and-local-X-saves.patch` | Add selected word ROL/LSR/SBC, accumulator ROR and local X0 PHX/PLX, with high-byte-first memory and stack writes. |
+| `0031-Resume-selected-timed-blocks-through-the-owning-scheduler.patch` | Add exact internal block continuations with stack and IR checks, real guest returns, scheduler ownership and event/resume tests. |
 
 Patches 0023 through 0026 are published and included in the title pin.
 The exact `02A3E2:M1X0` contract recovers four callers while keeping the callee

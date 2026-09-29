@@ -404,7 +404,10 @@ static bool run_mainline_to_wait(uint64 frame_deadline) {
 }
 
 static bool boot_to_wait(void) {
+  extern const CpuContinuationEntry g_aot_continuations[];
+  extern const unsigned g_aot_continuation_count;
   cpu_state_init(&g_cpu, g_ram);
+  interp_bridge_set_continuations(g_aot_continuations, g_aot_continuation_count);
   interp_bridge_set_post_rti_hook(capture_interrupt_return);
   s_resume_pc = kResetPc;
   s_booted = true;
