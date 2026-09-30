@@ -178,9 +178,9 @@ python tools/apply-snesrecomp-patches.py --check
 ```
 
 The tool verifies the complete source at the current pin without applying
-patches. At the older recovery pin or upstream base it applies twenty-two or
-thirty-four patches respectively to a clean checkout. It verifies patch SHA-256
-values and the contents of all 76 affected files against
+patches. At the older recovery pin or upstream base it applies twenty-four or
+thirty-six patches respectively to a clean checkout. It verifies patch SHA-256
+values and the contents of all 77 affected files against
 [`series.json`](../patches/snesrecomp/series.json). Source-file comparisons
 normalise CRLF line endings for Windows; patch files retain their exact bytes.
 An already complete series is verified without writing. An incomplete series
@@ -199,7 +199,7 @@ Do not reset or discard dependency changes just to make the applicator pass.
 
 The tracked cfg declares the accepted exact call entries. Both platform
 regeneration scripts call `tools/generate-normal.py`, which enables cfg roots
-and selects 42 exact entries for instruction timing. It also selects eight
+and selects 43 exact entries for instruction timing. It also selects nine
 validated internal scheduler continuations, separate from function roots.
 The normal output has 345 AOT bodies. The bus-cost selection contains 170
 exact keys, of which 136 emit bodies. Instruction timing is selected separately.
@@ -224,7 +224,7 @@ CMP, ADC and accumulator ASL. Patch 0024 adds ordinary direct JSR/JSL and
 immediate ORA. Unknown callee exits still block compiled continuations. External
 branch targets, indirect or special calls, unselected indirect addressing, other word stacks,
 unbalanced local stacks, other stack operations, unselected memory RMW, RTI and block moves remain outside this mode.
-Unsupported selections fail generation. The normal selection uses 42 validated
+Unsupported selections fail generation. The normal selection uses 43 validated
 exact entries, including the arithmetic-loop and word-operation entries below. Direct JML, CPX and INX are
 also supported by patches 0026 and 0027. Patch 0028 supports PHA/PLA with M=1
 and DEX. Stack depth must agree at joins and be zero at calls, compiled tails and

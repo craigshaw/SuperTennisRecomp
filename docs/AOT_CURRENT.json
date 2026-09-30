@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated": "2026-09-29",
+  "updated": "2026-09-30",
   "accepted": {
     "title_runtime_commit": "95b90e2579f9368913d6d0e0df45f850627822a2",
     "snesrecomp_commit": "9f9462528f21faa42ec3a7296df3d07c34db9fb3",
@@ -15,39 +15,27 @@
     "host_cost_evidence_pointer": "captures/aot-host-cost-current.txt"
   },
   "next": {
-    "action": "Make one static feasibility check for the 00899F NMI clear loop using saved boundaries and the existing interrupt owner. Identify the exact compiler/ownership gate before another capture or build.",
-    "reason": "The main-loop milestone is accepted. The unchanged NMI loop is the next ranked set, but its measured own host cost is only about 2% of the earlier runtime.",
-    "stop": "Do not invent a 07AC3F exit contract or apply ordinary continuation ownership to NMI without proof. Park it if it needs a separate scheduler mechanism; then check the small compiled-tail group once."
+    "action": "Run a bounded lab exit-state investigation for 00EF63:M1X0 with required repeat captures and exact entry/return/caller-continuation widths.",
+    "reason": "NMI clear and the compiled-tail group need broader compiler proofs. The current manifest directly blocks four callers on EF63 exit analysis.",
+    "stop": "Do not assume an exit contract or six available callers. Validate proposal scope, normal analysis and actual candidate execution before promotion."
   },
   "ranked_questions": [
     {
       "priority": 1,
-      "target": "00899F NMI clear work set",
-      "interpreted_instructions": 588032,
-      "distinct_instructions": 4,
-      "needed": "Check whether existing NMI ownership and local proof can cover the clear loop despite the 07AC3F exit-analysis gap; use the saved observation first.",
-      "stop": "Do not assume ordinary continuation ownership applies to NMI",
-      "measured_seconds_mean": 0.064085,
-      "measured_elapsed_share_percent": 2.0438
+      "target": "00EF63:M1X0 exit state",
+      "direct_blocked_callers": [
+        "02B022:M1X0",
+        "02B037:M1X0",
+        "02B04C:M1X0",
+        "02B066:M1X0"
+      ],
+      "needed": "Lab repeat captures, exact-entry proposal, normal analyzer and execution checks.",
+      "limit": "The older six-caller estimate includes 02AEF7 and 02AF10, which are not direct gaps in the current manifest."
     },
     {
       "priority": 2,
-      "target": [
-        "00D271:1:0",
-        "00D285:1:0",
-        "00D2A0:1:0"
-      ],
-      "interpreted_instructions_union": 139392,
-      "needed": "One feasibility check of the compiled tail and reusable compiler rule",
-      "stop": "Defer if it needs a separate scheduler mechanism without broader benefit"
-    },
-    {
-      "priority": 3,
-      "target": [
-        "00EF63",
-        "00C3B6"
-      ],
-      "needed": "Exact entry and exit proof; retain saved classification"
+      "target": "00C3B6:M1X0 exit state",
+      "needed": "Retain the saved callee timing failure; investigate only after EF63."
     }
   ],
   "do_not_repeat": [
@@ -57,7 +45,9 @@
     "07D8A5 residual 2239 instructions or whole-native terminal PLP epilogue",
     "Shared compiler suites for title tooling or cfg-only changes",
     "Accepted main-loop generation/profiling and back-edge investigation",
-    "Main-loop residual 11399 later-key instructions without a measured benefit case"
+    "Main-loop residual 11399 later-key instructions without a measured benefit case",
+    "NMI stop_on_rti guard investigation: that guard covers the atomic IRQ path, not this title NMI path",
+    "D271-family ORA-only experiment without resolving the saved-stack compiled-tail proof"
   ],
   "limits": [
     "The 13.89% elapsed improvement is from three warm local rendered headless pairs, not a desktop frame-rate claim.",
@@ -66,5 +56,23 @@
     "Saved host-cost shares describe the earlier runtime and bound potential savings; they are not predictions."
   ],
   "workflow": "docs/AOT_EXPERIMENTS.md",
-  "history": "docs/AOT_RECOVERY.md"
+  "history": "docs/AOT_RECOVERY.md",
+  "assessment_evidence_pointer": "captures/aot-next-feasibility-current.txt",
+  "parked_questions": [
+    {
+      "target": "00899F:M1X0 NMI clear loop",
+      "interpreted_instructions": 588032,
+      "measured_seconds_mean": 0.064085,
+      "reason": "NMI uses the schedulable interpreter, but no supported emitted owner exists. Callee exit proof, handler opcodes, RTI and bounded-region stack proof remain separate limits."
+    },
+    {
+      "target": [
+        "00D271:M1X0",
+        "00D285:M1X0",
+        "00D2A0:M1X0"
+      ],
+      "interpreted_instructions_union": 139392,
+      "reason": "Absolute ORA rejection precedes saved X across a compiled tail; standalone D2A0 pulls from its caller frame. Opcode support alone is insufficient."
+    }
+  ]
 }

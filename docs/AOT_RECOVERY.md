@@ -5,7 +5,69 @@ scheduler continuation entries. The accepted runtime checkpoint is title `95b90e
 The shared pin is `9f94625`, recorded in `SNESRECOMP_PATCHES.md`. This report
 supersedes the older handoff in `AOT_BATCH_SCREENING.md`.
 
-## Latest checkpoint: main-loop continuation accepted, 29 September 2026
+## Latest checkpoint: NMI and compiled-tail feasibility, 30 September 2026
+
+The accepted runtime remains title `95b90e2` and shared `9f94625`: 345 bodies,
+43 timing roots and nine continuations. Both bounded feasibility checks are
+complete. Neither group is ready for a small selection change. No compiler,
+runtime, cfg or generated selection changed.
+
+The NMI check reuses the observed `00899F:M1X0` state, S=`0FEB`, X=0..31,
+and the saved 588,032-instruction count and 0.064-second own-cost estimate.
+Static inspection shows that `begin_nmi` pushes an interrupt frame and sets
+pending PC `008917`. The main scheduler then uses `run_until_quiescent`,
+with auto-quiescence enabled and `stop_on_rti` disabled. Thus the bridge's
+`stop_on_rti` continuation guard does not itself exclude this title's NMI.
+The separate atomic IRQ path uses `run_interrupt`; do not remove its guard.
+
+The actual compiler limits remain: M0X0 and M1X0 handler roots are LLE-only
+because the call at `00897E` lacks a `07AC3F:M1X0` exit proof. PHB at
+`00891F`, PHD at `008920`, and the RTI epilogue also exceed current timing
+support. Existing continuations need an emitted owner and whole-body stack
+proof. Selecting just the clear loop needs bounded region emission and a
+proof for its active interrupt frame. This does not establish a need for a
+new scheduler. Park it at the measured benefit; add no fake root or exit fact.
+
+One normal Python generation attempt selects instruction timing for `00D271`,
+`00D285` and `00D2A0`, all M1X0, without continuations. It fails before build
+at absolute ORA `00D287:M1X0`. A separate static diagnostic collects opcode
+rejections, then runs the unchanged stack proof. It emits no C or guest
+execution. Its decoded counts match the manifest: 109, 99 and 89 instructions.
+It finds absolute ORA at `00D287` and `00D2B2`, plus independent stack limits:
+
+- `00D271` and `00D285` fail balanced-stack-at-transfer validation. PHX at
+  `00D294` leaves two saved bytes across JML `00D316` to compiled `00D2A0`.
+- Standalone `00D2A0` fails the caller-frame-pull check at PLX `00D2AF`.
+  The enclosing path supplies that value, not a local push in this exact root.
+
+ORA support alone is insufficient. Patch 0036 requires zero local depth and
+an uncompiled internal destination. A future approach could keep the jump
+within its decoded owner, but needs a separate stack/control-flow proof and
+measured benefit. Park this 139,392-instruction union. No candidate was built
+or replayed, and no untested opcode support was added.
+
+Patch verification, publication boundary and whitespace checks pass. Both
+normal executable hashes, all seven generated C files and the full analyzer
+manifest match the accepted main-loop checkpoint. Its shared suites, replay
+and neutral-smoke evidence are reused. No new build, replay, Mesen capture,
+bulk screen or shared suite ran. Unrelated UI and lab changes are preserved.
+The patch guide's stale current counts were corrected.
+
+Private evidence is indexed by `captures/aot-next-feasibility-current.txt`
+under `captures/aot-next-feasibility-20260930`. Read `feasibility-summary.json`,
+`tails1/generate.log` and `stack-gates.json`. The diagnostic script's relaxed
+opcode reporting is analysis-only, not a generation policy or promotion gate.
+
+**Next task:** use the lab for bounded exact exit-state evidence at
+`00EF63:M1X0`, including required repeat captures and return/caller-continuation
+widths. The current manifest directly blocks `02B022`, `02B037`, `02B04C` and
+`02B066`, all M1X0. The older six-caller group included `02AEF7` and `02AF10`;
+these are not six immediate additions. Check exact-entry proposal scope,
+normal analysis and which candidate bodies actually execute. Keep the saved
+classification and controls, and leave the failing `00C3B6` path behind this
+question. Do not assume an exit contract or promise a caller count.
+
+## Previous checkpoint: main-loop continuation accepted, 29 September 2026
 
 The normal build now resumes at `008035:M1X0` within existing owner
 `00801E:M1X0`. The main loop uses AOT for five calls and its long back-edge,
